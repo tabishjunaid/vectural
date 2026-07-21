@@ -1,0 +1,16 @@
+# Example codebase manifest (implementation-plan §4.4, design-document §3.4).
+#
+# The manifest is the ONLY human-authored mapping from filesystem path to graph
+# node identity. It is reviewed like code. A service directory absent from this
+# file is never walked and never silently appears in the graph.
+#
+# This example points at the repository's own directories purely so the
+# `vectural-ingest` CLI has something real to chunk out of the box. Replace it
+# with the actual estate layout (one directory per repository under one root).
+services:
+  - name: ux-design
+    path: ux-design
+    language: javascript
+    art: platform-art
+    criticality: tier-2
+    owner: platform-team
