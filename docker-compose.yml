@@ -1,0 +1,86 @@
+# Vectural local stack (design-document §6 as a runnable compose approximation).
+#
+#   docker compose up --build                 # core: backend + frontend + postgres + valkey
+#   docker compose --profile datastores up    # also start OpenSearch + Neo4j
+#
+# The backend runs the in-memory bootstrap (fake gateway, no real spend), so the
+# core stack is fully functional without the heavy datastores. Postgres, Valkey,
+# OpenSearch, and Neo4j are provisioned for the config-gated real adapters to
+# switch onto once wired.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      VECTURAL_ESTATE_ROOT: sample-estate
+      VECTURAL_MANIFEST_PATH: sample-estate/manifest.yaml
+      # Datastore DSNs (consumed by the real adapters when enabled):
+      VECTURAL_POSTGRES_DSN: postgresql://vectural:vectural@postgres:5432/vectural
+      VECTURAL_VALKEY_URL: redis://valkey:6379/0
+      VECTURAL_OPENSEARCH_URL: http://opensearch:9200
+      VECTURAL_NEO4J_URI: bolt://neo4j:7687
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - valkey
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5175:80"
+    depends_on:
+      - backend
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vectural
+      POSTGRES_PASSWORD: vectural
+      POSTGRES_DB: vectural
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vectural"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "6379:6379"
+
+  # Heavy datastores — started only with `--profile datastores`.
+  opensearch:
+    image: opensearchproject/opensearch:2.17.0
+    profiles: ["datastores"]
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - osdata:/usr/share/opensearch/data
+
+  neo4j:
+    image: neo4j:5-community
+    profiles: ["datastores"]
+    environment:
+      NEO4J_AUTH: neo4j/vecturalpw
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4jdata:/data
+
+volumes:
+  pgdata:
+  osdata:
+  neo4jdata:

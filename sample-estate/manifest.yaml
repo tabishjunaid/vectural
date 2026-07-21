@@ -1,0 +1,15 @@
+services:
+  - name: gateway
+    path: gateway
+    language: python
+    criticality: tier-1
+  - name: payments
+    path: payments
+    language: python
+    criticality: tier-1
+  - name: ledger
+    path: ledger
+    language: python
+  - name: notifications
+    path: notifications
+    language: python

@@ -8,6 +8,29 @@ See [`plan/implementation-plan.md`](plan/implementation-plan.md) and
 [`plan/design-document.md`](plan/design-document.md) for the full design. The
 frontend is tracked separately in [`plan/ui-development-plan.md`](plan/ui-development-plan.md).
 
+## Run the whole thing
+
+The React frontend and the FastAPI backend run as an integrated system. The
+backend boots by ingesting `sample-estate/` into in-memory stores and running all
+four summarisation tiers against a **fake gateway** (no real spend, no external
+datastore), so the stack is fully functional standalone.
+
+```bash
+# Docker (backend + frontend + Postgres + Valkey):
+docker compose up --build            # → frontend http://localhost:5175, API http://localhost:8000
+docker compose --profile datastores up   # also start OpenSearch + Neo4j
+
+# Or locally, two terminals:
+uv run uvicorn backend.asgi:app --port 8000          # backend
+npm --prefix frontend run dev                        # frontend → http://localhost:5175
+```
+
+Live surfaces: **Ask** (`/ask` — cited answers, refusal, cache), **Coverage**
+(`/coverage`), **Review** (`/review` — approve a flow narrative and watch that
+service jump to tier 4 on Coverage, the §5.4 single source of truth), and
+`/metrics`. The frontend API client lives in `frontend/src/lib/api.ts`; the
+runnable backend is `backend/bootstrap.py` + `backend/asgi.py`.
+
 ## Backend status
 
 Seven phases implemented, all fully testable offline (no gateway, no infra):

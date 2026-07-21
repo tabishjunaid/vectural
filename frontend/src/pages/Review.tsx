@@ -1,29 +1,44 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AppShell } from '../components/AppShell';
 import { AnswerMarkdown } from '../components/AnswerMarkdown';
 import { ConfirmDialog } from '../components/ConfirmDialog';
-import { useCitationDrawer } from '../components/citation';
-import { CITATIONS, REVIEW_QUEUE, type Citation } from '../lib/mock-data';
+import type { ReviewItem } from '../lib/mock-data';
+import { getReviewQueue, reviewAction, type ReviewVerb } from '../lib/api';
 
-function citationLabel(c: Citation): string {
-  return c.kind === 'code' ? `${c.service}/${c.file}:${c.line}` : `${c.service} → flow: "${c.flow}"`;
-}
-
-/* Flow Narrative Review — ports ux-design/review.html. The only write surface
-   in the product; every other screen is read-only Q&A. Architect-gated (UI-4
-   wires the real approve/reject workflow — actions here are mock confirmations). */
+/* Flow Narrative Review — live wired to /review. The only write surface in the
+   product; every other screen is read-only Q&A. Architect-gated. Approving a
+   narrative makes it authoritative and (via /coverage) bumps its services to
+   tier 4. */
 export function Review() {
-  const [activeId, setActiveId] = useState(REVIEW_QUEUE[0].id);
+  const [queue, setQueue] = useState<ReviewItem[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [dialog, setDialog] = useState<{ open: boolean; message: string }>({ open: false, message: '' });
-  const { openCitation } = useCitationDrawer();
+  const [error, setError] = useState<string | null>(null);
 
-  const item = REVIEW_QUEUE.find((r) => r.id === activeId) ?? REVIEW_QUEUE[0];
+  const load = () =>
+    getReviewQueue()
+      .then((items) => {
+        setQueue(items);
+        setActiveId((cur) => (cur && items.some((i) => i.id === cur) ? cur : (items[0]?.id ?? null)));
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : 'failed to load review queue'));
 
-  const act = (verb: string) =>
-    setDialog({
-      open: true,
-      message: `Mock action — "${item.title}" would be marked ${verb}. (No backend in UI-0.)`,
-    });
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const item = queue.find((r) => r.id === activeId) ?? queue[0];
+
+  const act = async (verb: ReviewVerb, label: string) => {
+    if (!item) return;
+    try {
+      await reviewAction(item.id, verb, 'A. Architect', verb === 'request-changes' ? 'Please revise' : undefined);
+      setDialog({ open: true, message: `"${item.title}" was ${label}. The queue and coverage are now updated.` });
+      await load();
+    } catch (e) {
+      setDialog({ open: true, message: `Action failed: ${e instanceof Error ? e.message : 'error'}` });
+    }
+  };
 
   return (
     <AppShell
@@ -39,79 +54,78 @@ export function Review() {
             this is the only write surface in the product; every other screen is read-only Q&amp;A.
           </p>
 
-          <div className="panel review-layout" style={{ minHeight: 480 }}>
-            <div className="review-queue-list">
-              {REVIEW_QUEUE.map((q) => (
-                <div
-                  key={q.id}
-                  className={`queue-item ${q.id === activeId ? 'active' : ''}`}
-                  onClick={() => setActiveId(q.id)}
-                >
-                  <div className="title">
-                    {q.status === 'needs_review' ? '⚠ ' : '○ '}
-                    {q.title}
-                  </div>
-                  <div className={`status-line ${q.status}`}>
-                    {q.status === 'needs_review' ? 'needs review' : 'pending (new)'}
-                  </div>
-                </div>
-              ))}
-            </div>
+          {error && <p style={{ color: 'var(--amber)' }}>{error}</p>}
+          {!error && queue.length === 0 && (
+            <p style={{ color: 'var(--text-dim)' }}>Review queue is empty — every flow is approved.</p>
+          )}
 
-            <div className="review-detail">
-              <div className="review-detail-header">
-                <h3>{item.title}</h3>
-                <div className="reason">
-                  {item.status === 'needs_review' ? '⚠ ' : ''}
-                  {item.reason}
-                </div>
-              </div>
-
-              <div className="review-meta-grid">
-                <div>
-                  <span className="k">Contributing services</span>
-                  {item.contributingServices.join(', ')}
-                </div>
-                <div>
-                  <span className="k">Trigger</span>
-                  {item.trigger}
-                </div>
-                <div>
-                  <span className="k">Last approved</span>
-                  {item.lastApproved ?? 'Never approved'}
-                </div>
-                <div>
-                  <span className="k">Status</span>
-                  {item.status === 'needs_review' ? 'Needs re-review' : 'Pending first review'}
-                </div>
-              </div>
-
-              <AnswerMarkdown markdown={item.markdown} />
-
-              {item.citationIds.length > 0 && (
-                <div className="sources-rail" style={{ borderTop: 'none', paddingTop: 0, marginTop: 14 }}>
-                  <div className="sources-rail-label">Sources</div>
-                  {item.citationIds.map((id) => (
-                    <div className="source-row" key={id} onClick={() => openCitation(id)}>
-                      <span className="num">[{id}]</span> {citationLabel(CITATIONS[id])}
+          {item && (
+            <div className="panel review-layout" style={{ minHeight: 480 }}>
+              <div className="review-queue-list">
+                {queue.map((q) => (
+                  <div
+                    key={q.id}
+                    className={`queue-item ${q.id === activeId ? 'active' : ''}`}
+                    onClick={() => setActiveId(q.id)}
+                  >
+                    <div className="title">
+                      {q.status === 'needs_review' ? '⚠ ' : '○ '}
+                      {q.title}
                     </div>
-                  ))}
-                </div>
-              )}
+                    <div className={`status-line ${q.status}`}>
+                      {q.status === 'needs_review' ? 'needs review' : 'pending (new)'}
+                    </div>
+                  </div>
+                ))}
+              </div>
 
-              <div className="review-actions">
-                <button className="btn-approve" onClick={() => act('approved')}>
-                  Approve
-                </button>
-                <button className="btn-request" onClick={() => act('sent back for changes')}>
-                  Request changes
-                </button>
-                <button className="btn-reject" onClick={() => act('rejected')}>
-                  Reject
-                </button>
+              <div className="review-detail">
+                <div className="review-detail-header">
+                  <h3>{item.title}</h3>
+                  <div className="reason">
+                    {item.status === 'needs_review' ? '⚠ ' : ''}
+                    {item.reason}
+                  </div>
+                </div>
+
+                <div className="review-meta-grid">
+                  <div>
+                    <span className="k">Contributing services</span>
+                    {item.contributingServices.join(', ')}
+                  </div>
+                  <div>
+                    <span className="k">Trigger</span>
+                    {item.trigger}
+                  </div>
+                  <div>
+                    <span className="k">Last approved</span>
+                    {item.lastApproved ?? 'Never approved'}
+                  </div>
+                  <div>
+                    <span className="k">Status</span>
+                    {item.status === 'needs_review' ? 'Needs re-review' : 'Pending first review'}
+                  </div>
+                </div>
+
+                <AnswerMarkdown markdown={item.markdown} />
+
+                <div className="review-actions">
+                  <button className="btn-approve" onClick={() => act('approve', 'approved')}>
+                    Approve
+                  </button>
+                  <button
+                    className="btn-request"
+                    onClick={() => act('request-changes', 'sent back for changes')}
+                  >
+                    Request changes
+                  </button>
+                  <button className="btn-reject" onClick={() => act('reject', 'rejected')}>
+                    Reject
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
 

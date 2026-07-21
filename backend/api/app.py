@@ -18,11 +18,13 @@ from collections.abc import Callable, Iterator
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from backend.answer.models import Answer
 from backend.answer.service import AnswerService
 from backend.api.answer_schemas import AskRequest
+from backend.api.coverage import CoverageRow, CoverageService
 from backend.api.review_schemas import ReviewAction
 from backend.api.schemas import HealthResponse, SearchRequest, SearchResponse
 from backend.domain.models import Persona
@@ -63,7 +65,9 @@ def create_app(
     *,
     answer_service: AnswerService | None = None,
     flow_service: FlowNarrativeService | None = None,
+    coverage_service: CoverageService | None = None,
     metrics: MetricsCollector | None = None,
+    cors_origins: list[str] | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Vectural API",
@@ -73,7 +77,16 @@ def create_app(
     app.state.retrieval = retrieval
     app.state.answer_service = answer_service
     app.state.flow_service = flow_service
+    app.state.coverage_service = coverage_service
     app.state.metrics = metrics
+
+    # The React frontend (a different origin in dev) calls this API directly.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins or ["http://localhost:5175", "http://localhost:5173"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/healthz", response_model=HealthResponse, tags=["ops"])
     def healthz() -> HealthResponse:
@@ -85,6 +98,13 @@ def create_app(
         if not isinstance(collector, MetricsCollector):
             raise HTTPException(status_code=501, detail="metrics not enabled")
         return collector.snapshot()
+
+    @app.get("/coverage", response_model=list[CoverageRow], tags=["coverage"])
+    def coverage() -> list[CoverageRow]:
+        service = getattr(app.state, "coverage_service", None)
+        if not isinstance(service, CoverageService):
+            raise HTTPException(status_code=501, detail="coverage not enabled")
+        return service.rows()
 
     @app.post("/search", response_model=SearchResponse, tags=["retrieval"])
     def search(req: SearchRequest, service: RetrievalDep) -> SearchResponse:

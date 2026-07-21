@@ -1,67 +1,61 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AppShell, COVERAGE_PCT } from '../components/AppShell';
 import { AnswerMarkdown } from '../components/AnswerMarkdown';
 import { SourcesRail } from '../components/SourcesRail';
 import { PersonaSelect } from '../components/PersonaSelect';
+import { useCitationDrawer } from '../components/citation';
 import { usePersona } from '../lib/persona';
-import {
-  INSTANT_ANSWER,
-  NORMAL_ANSWERS,
-  REFUSAL_SCENARIO,
-  refusalTextForService,
-} from '../lib/mock-data';
+import { ask, type LiveAnswer } from '../lib/api';
 
-type Scenario = 'normal' | 'streaming' | 'instant' | 'refusal';
-
-const SCENARIOS: { id: Scenario; label: string }[] = [
-  { id: 'normal', label: 'Normal answer' },
-  { id: 'streaming', label: 'Simulate streaming' },
-  { id: 'instant', label: 'Instant answer (cache/structural)' },
-  { id: 'refusal', label: 'Refusal (no coverage)' },
+const EXAMPLES = [
+  'How does the gateway charge via payments and ledger?',
+  'What does payments call?',
+  'How are payment events consumed?',
 ];
 
-function headingsOf(markdown: string): string[] {
-  return [...markdown.matchAll(/^## (.*)$/gm)].map((m) => m[1]);
-}
-
-/* Ask — ports ux-design/ask.html. Four terminal render states enumerated by
-   the scenario bar (streaming / answer+citations / instant / refusal), driven
-   by the current persona. Refusal is a first-class state, not an error (R1). */
+/* Ask — live wired to POST /ask. Renders the backend's terminal states
+   (synthesized / instant / refusal). Refusal is a first-class state, not an
+   error (R1). Persona is threaded into every request (R6). */
 export function Ask() {
   const { personaId, persona } = usePersona();
-  const [scenario, setScenario] = useState<Scenario>('normal');
-  const [priorCollapsed, setPriorCollapsed] = useState(true);
+  const { setCitations } = useCitationDrawer();
+  const [question, setQuestion] = useState(EXAMPLES[0]);
+  const [answer, setAnswer] = useState<LiveAnswer | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  // Streaming simulation — reveal the raw markdown line by line, then swap to
-  // the fully parsed answer + sources once complete.
-  const [streamText, setStreamText] = useState('');
-  const [streaming, setStreaming] = useState(false);
-  const [runNonce, setRunNonce] = useState(0);
-
-  useEffect(() => {
-    if (scenario !== 'streaming') {
-      setStreaming(false);
-      return;
-    }
-    const lines = NORMAL_ANSWERS[personaId].markdown.split('\n');
-    let i = 0;
-    let shown = '';
-    setStreaming(true);
-    setStreamText('');
-    const timer = setInterval(() => {
-      shown += (i > 0 ? '\n' : '') + lines[i];
-      i += 1;
-      setStreamText(shown);
-      if (i >= lines.length) {
-        clearInterval(timer);
-        setStreaming(false);
+  const run = useCallback(
+    async (q: string) => {
+      const trimmed = q.trim();
+      if (!trimmed) return;
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await ask(trimmed, personaId);
+        setAnswer(result);
+        setCitations(result.citations);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'request failed');
+      } finally {
+        setLoading(false);
       }
-    }, 90);
-    return () => clearInterval(timer);
-  }, [scenario, personaId, runNonce]);
+    },
+    [personaId, setCitations],
+  );
 
-  const data = NORMAL_ANSWERS[personaId];
+  // Ask on first load and whenever the persona changes (altitude changes, R6).
+  useEffect(() => {
+    void run(question);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [personaId]);
+
+  const send = () => {
+    const q = inputRef.current?.value ?? question;
+    setQuestion(q);
+    void run(q);
+  };
 
   return (
     <AppShell
@@ -79,100 +73,61 @@ export function Ask() {
       <div className="main-scroll">
         <div className="main-inner">
           <div className="scenario-bar">
-            {SCENARIOS.map((s) => (
+            {EXAMPLES.map((ex) => (
               <button
-                key={s.id}
-                className={`scenario-btn ${scenario === s.id ? 'active' : ''}`}
-                onClick={() => setScenario(s.id)}
+                key={ex}
+                className={`scenario-btn ${question === ex ? 'active' : ''}`}
+                onClick={() => {
+                  setQuestion(ex);
+                  if (inputRef.current) inputRef.current.value = ex;
+                  void run(ex);
+                }}
               >
-                {s.label}
+                {ex}
               </button>
             ))}
           </div>
 
-          {/* prior turn — collapsed instant-answer example */}
-          <div className={`turn ${priorCollapsed ? 'collapsed' : ''}`}>
-            <div className="question-bubble">
-              <span className="who">You</span>What depends on checkout-svc, three hops out?
-            </div>
-            <div className="answer-card">
-              <span className="answer-mode-tag">● Structural result</span>
-              <AnswerMarkdown markdown={INSTANT_ANSWER.markdown} />
-            </div>
-            {priorCollapsed && (
-              <button className="show-full-btn" onClick={() => setPriorCollapsed(false)}>
-                Show full answer ↓
-              </button>
-            )}
-          </div>
-
-          {/* live turn */}
           <div className="turn">
-            {scenario === 'refusal' ? (
-              <>
-                <div className="question-bubble">
-                  <span className="who">You</span>
-                  {REFUSAL_SCENARIO.question}
-                </div>
-                <div className="refusal-card">
-                  <div className="refusal-kicker">Not answered · citation could not be resolved</div>
-                  <p>{refusalTextForService(REFUSAL_SCENARIO.serviceName)}</p>
-                  <Link
-                    className="coverage-link"
-                    to={`/coverage?service=${REFUSAL_SCENARIO.serviceName}`}
-                  >
-                    View coverage schedule for {REFUSAL_SCENARIO.serviceName} →
+            <div className="question-bubble">
+              <span className="who">You</span>
+              {question}
+            </div>
+
+            {loading && (
+              <div className="answer-card">
+                <span className="answer-mode-tag streaming">● thinking…</span>
+              </div>
+            )}
+
+            {!loading && error && (
+              <div className="refusal-card">
+                <div className="refusal-kicker">Request failed</div>
+                <p>{error}. Is the backend running on the configured API base?</p>
+              </div>
+            )}
+
+            {!loading && !error && answer && answer.mode === 'refusal' && (
+              <div className="refusal-card">
+                <div className="refusal-kicker">Not answered · {answer.reason}</div>
+                <p>{answer.markdown}</p>
+                {answer.likelyServices[0] && (
+                  <Link className="coverage-link" to={`/coverage?service=${answer.likelyServices[0]}`}>
+                    View coverage schedule for {answer.likelyServices[0]} →
                   </Link>
-                </div>
-              </>
-            ) : scenario === 'instant' ? (
-              <>
-                <div className="question-bubble">
-                  <span className="who">You</span>
-                  {INSTANT_ANSWER.question}
-                </div>
-                <div className="answer-card">
-                  <span className="answer-mode-tag">● {INSTANT_ANSWER.mode} · no gateway call</span>
-                  <AnswerMarkdown markdown={INSTANT_ANSWER.markdown} />
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="question-bubble">
-                  <span className="who">You</span>
-                  {data.question}
-                </div>
-                <div className="answer-card">
-                  <span className={`answer-mode-tag ${streaming ? 'streaming' : ''}`}>
-                    {streaming ? '● streaming…' : '● Synthesized answer'}
-                  </span>
+                )}
+              </div>
+            )}
 
-                  {!streaming && headingsOf(data.markdown).length > 2 && (
-                    <div className="answer-outline">
-                      <span className="outline-label">In this answer</span>
-                      {headingsOf(data.markdown).map((h) => (
-                        <a href="#" key={h}>
-                          {h}
-                        </a>
-                      ))}
-                    </div>
-                  )}
-
-                  {streaming ? (
-                    <div className="answer-body">
-                      <p className="stream-raw">
-                        {streamText}
-                        <span className="stream-cursor" />
-                      </p>
-                    </div>
-                  ) : (
-                    <>
-                      <AnswerMarkdown markdown={data.markdown} />
-                      <SourcesRail citationIds={data.citationIds} persona={personaId} />
-                    </>
-                  )}
-                </div>
-              </>
+            {!loading && !error && answer && answer.mode !== 'refusal' && (
+              <div className="answer-card">
+                <span className="answer-mode-tag">
+                  ● {answer.mode === 'instant' ? 'Instant · no gateway call' : 'Synthesized answer'}
+                  {answer.stale && ' · may be stale'}
+                </span>
+                <AnswerMarkdown markdown={answer.markdown} />
+                <SourcesRail citationIds={answer.citationIds} persona={personaId} />
+              </div>
             )}
           </div>
         </div>
@@ -182,11 +137,13 @@ export function Ask() {
         <div className="composer-inner">
           <PersonaSelect />
           <input
+            ref={inputRef}
             type="text"
-            defaultValue="How does a refund reversal propagate across services?"
+            defaultValue={question}
             placeholder="Ask about the codebase..."
+            onKeyDown={(e) => e.key === 'Enter' && send()}
           />
-          <button className="composer-send" onClick={() => setRunNonce((n) => n + 1)}>
+          <button className="composer-send" onClick={send}>
             Send
           </button>
         </div>

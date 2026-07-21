@@ -1,12 +1,15 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
-import { CITATIONS, type Citation } from '../lib/mock-data';
+import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
+import type { Citation } from '../lib/mock-data';
 
 /* Citation drawer — a slide-over that resolves a citation id to its concrete
-   evidence (path + line, or flow narrative). Mirrors the mockup's
-   openCitationById. Verifiability is load-bearing (R1): a citation always
-   resolves to a specific chunk, and this is where the user inspects it. */
+   evidence (path + line, or flow narrative). Verifiability is load-bearing (R1):
+   a citation always resolves to a specific chunk, and this is where the user
+   inspects it. The citations map is set live by whichever screen is showing an
+   answer (Ask / Review), so chips and the drawer read real backend evidence. */
 interface CitationDrawerValue {
   openCitation: (id: number) => void;
+  setCitations: (citations: Record<number, Citation>) => void;
+  citations: Record<number, Citation>;
 }
 
 const CitationDrawerContext = createContext<CitationDrawerValue | null>(null);
@@ -20,17 +23,14 @@ export function useCitationDrawer(): CitationDrawerValue {
 
 function chunkPreview(c: Citation): string {
   if (c.kind === 'code') {
-    const body = c.file?.includes('refund')
-      ? 'def reverse_refund(refund_id: str) -> None:\n    ...'
-      : 'def handle_event(evt) -> None:\n    ...';
-    return `# ${c.file}, line ${c.line}\n...\n${body}\n...`;
+    return `# ${c.file}, line ${c.line}\n(evidence chunk resolved from the retrieved set)`;
   }
-  return `Flow narrative excerpt — "${c.flow}"\nContributing services shown in the Flow Narrative Review screen.`;
+  return `Flow narrative "${c.flow}" — an architect-approved cross-service narrative.`;
 }
 
 export function CitationChip({ id }: { id: number }) {
-  const { openCitation } = useCitationDrawer();
-  const c = CITATIONS[id];
+  const { openCitation, citations } = useCitationDrawer();
+  const c = citations[id];
   return (
     <button
       type="button"
@@ -45,10 +45,15 @@ export function CitationChip({ id }: { id: number }) {
 
 export function CitationDrawerProvider({ children }: { children: ReactNode }) {
   const [activeId, setActiveId] = useState<number | null>(null);
-  const c = activeId != null ? CITATIONS[activeId] : null;
+  const [citations, setCitations] = useState<Record<number, Citation>>({});
+  const value = useMemo(
+    () => ({ openCitation: setActiveId, setCitations, citations }),
+    [citations],
+  );
+  const c = activeId != null ? citations[activeId] : null;
 
   return (
-    <CitationDrawerContext.Provider value={{ openCitation: setActiveId }}>
+    <CitationDrawerContext.Provider value={value}>
       {children}
       {c && (
         <>

@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CITATIONS, type Citation, type PersonaId } from '../lib/mock-data';
+import type { Citation, PersonaId } from '../lib/mock-data';
 import { useCitationDrawer } from './citation';
 
 /* Sources rail — same evidence, persona-dependent density (§5.1):
    - engineer / architect: full path:line, staleness + needs-review badges
    - product owner: referenced services / flows only
-   - business owner: collapsed by default, expands to service names */
+   - business owner: collapsed by default, expands to service names
+   Reads the live citations map from the drawer context. */
 
 function fullLabel(c: Citation): string {
   return c.kind === 'code' ? `${c.service}/${c.file}:${c.line}` : `${c.service} → flow: "${c.flow}"`;
@@ -16,8 +17,9 @@ function shortLabel(c: Citation): string {
 }
 
 function Row({ id, persona }: { id: number; persona: PersonaId }) {
-  const { openCitation } = useCitationDrawer();
-  const c = CITATIONS[id];
+  const { openCitation, citations } = useCitationDrawer();
+  const c = citations[id];
+  if (!c) return null;
   const label = persona === 'po' ? shortLabel(c) : fullLabel(c);
   return (
     <div className="source-row" onClick={() => openCitation(id)}>
@@ -43,6 +45,7 @@ function Row({ id, persona }: { id: number; persona: PersonaId }) {
 
 export function SourcesRail({ citationIds, persona }: { citationIds: number[]; persona: PersonaId }) {
   const [expanded, setExpanded] = useState(false);
+  if (citationIds.length === 0) return null;
 
   if (persona === 'bo' && !expanded) {
     return (
