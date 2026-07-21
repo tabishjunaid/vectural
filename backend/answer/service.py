@@ -11,6 +11,7 @@ retrieval are the two no-gateway-synthesis short circuits (§5.5, §5.4).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -36,6 +37,13 @@ class FlowEvidenceProvider(Protocol):
     def evidence_for(self, anchors: set[str]) -> list[SearchHit]: ...
 
 
+class AnswerMetrics(Protocol):
+    """Records answer-path metrics (§7.1). Satisfied by ``MetricsCollector``."""
+
+    def record_answer(self, mode: AnswerMode) -> None: ...
+    def record_latency_ms(self, latency_ms: float) -> None: ...
+
+
 @dataclass
 class AnswerService:
     retrieval: RetrievalService
@@ -44,10 +52,20 @@ class AnswerService:
     cache: SemanticAnswerCache | None = None
     flows: FlowEvidenceProvider | None = None
     freshness: FreshnessState | None = None
+    metrics: AnswerMetrics | None = None
     commit_sha: str = "WORKING"
     top_n: int = 5
 
     def answer(self, question: str, persona: Persona = Persona.ENGINEER) -> Answer:
+        """Answer a question, timing it and recording answer-path metrics (§7.1)."""
+        start = time.perf_counter()
+        result = self._compute(question, persona)
+        if self.metrics is not None:
+            self.metrics.record_latency_ms((time.perf_counter() - start) * 1000.0)
+            self.metrics.record_answer(result.mode)
+        return result
+
+    def _compute(self, question: str, persona: Persona) -> Answer:
         # Fast path: semantic cache hit — no gateway call at all (§5.5).
         if self.cache is not None:
             cached = self.cache.get(question, self.commit_sha, persona)

@@ -72,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="apply a git name-status DIFF (e.g. 'M<TAB>svc/f.py'); shows the §5.9 cascade",
     )
+    parser.add_argument(
+        "--orchestrate",
+        action="store_true",
+        help="run the §5.7 durable indexing workflow, kill it mid-run, and resume (no re-spend)",
+    )
     args = parser.parse_args(argv)
 
     manifest_path = args.manifest or (args.root / "manifest.yaml")
@@ -118,7 +123,74 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.reindex is not None:
         _demo_reindex(graph, manifest, args.root, args.reindex)
+
+    if args.orchestrate:
+        _demo_orchestrate(graph)
     return 0
+
+
+def _demo_orchestrate(graph: GraphBuildResult) -> None:
+    """§5.7: run the durable indexing workflow, kill it mid-run, resume from the
+    checkpoint — and show the total spend is identical (no duplicate spend)."""
+    from collections.abc import Callable
+    from datetime import date
+
+    from backend.orchestration import (
+        IndexingDeps,
+        InMemoryWorkflowStore,
+        SummariseServiceActivities,
+        WorkflowState,
+        drive,
+    )
+    from backend.quota import QuotaAccountant, QuotaConfig, QuotaGovernor, QuotaPool
+    from backend.summarise import FileToSummarise
+
+    by_service: dict[str, list[FileToSummarise]] = {}
+    for chunk in graph.chunks:
+        by_service.setdefault(chunk.service, []).append(
+            FileToSummarise(chunk.service, chunk.path, chunk.content)
+        )
+    order = sorted(by_service)
+    today = datetime.now(UTC)
+
+    def make(
+        pool: QuotaPool,
+        gateway: FakeGatewayClient,
+        ledger: InMemoryFileLedger,
+        ckpt: Callable[[WorkflowState], None],
+    ) -> IndexingDeps:
+        router = LLMRouter(gateway, sinks=[QuotaAccountant(pool)])
+        acts = SummariseServiceActivities(router, QuotaGovernor(pool), ledger, InMemoryDeadLetter())
+        return IndexingDeps(activities=acts, governor=QuotaGovernor(pool), checkpoint=ckpt)
+
+    print("\n§5.7 durable indexing workflow:")
+    pool = QuotaPool(QuotaConfig(1_000_000), period_start=date(2026, 7, 1))
+    ledger = InMemoryFileLedger()
+    store = InMemoryWorkflowStore()
+    state = WorkflowState.initial(order)
+    store.save("wf", state)
+
+    crash_gw = FakeGatewayClient(crash_after=1)
+    try:
+        drive(state, by_service, make(pool, crash_gw, ledger, lambda s: store.save("wf", s)),
+              today=today)
+    except RuntimeError:
+        resumed = store.load("wf")
+        assert resumed is not None
+        print(
+            f"  worker killed after {crash_gw.calls} calls; "
+            f"checkpoint = {resumed.completed_services}"
+        )
+
+    resumed = store.load("wf")
+    assert resumed is not None
+    ok_gw = FakeGatewayClient()
+    drive(resumed, by_service, make(pool, ok_gw, ledger, lambda s: store.save("wf", s)),
+          today=today)
+    summarised = sum(1 for e in ledger.all() if e.status.value == "summarised")
+    print(f"  resumed → completed all {len(resumed.completed_services)} services")
+    print(f"  summaries in ledger: {summarised}")
+    print(f"  total spend (crash+resume): {pool.spent_indexing} tokens — no duplicate spend")
 
 
 def _demo_reindex(

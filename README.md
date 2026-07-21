@@ -51,6 +51,13 @@ Seven phases implemented, all fully testable offline (no gateway, no infra):
   to `needs_review` (reusing Phase 7), marks files for re-summarisation, and sets a
   **visible staleness flag** on answers (serving continues, §4.4). Backstop:
   a reconciliation sweep deletes index orphans no longer in the git tree.
+- **Durable orchestration** (§5.7): the indexing spend loop modelled as a Temporal
+  parent→child workflow — services in priority order, per-service child activity
+  (service atomicity), **checkpoint after each service**, quota **park** (durable
+  timer, not an error) on hold, and **continue-as-new** at weekly tranche boundaries.
+  A killed workflow **resumes from its checkpoint and re-spends nothing** (the Phase 5
+  exit criterion), because completed files are skipped via the file_ledger. The real
+  `temporalio` worker is a thin marked adapter over this deterministic logic.
 
 ```
 backend/          # the Python package (import root); pairs with the UI agent's frontend/
@@ -63,13 +70,15 @@ backend/          # the Python package (import root); pairs with the UI agent's 
   llm/            # the single gateway egress: router, model config, fake+real gateway (§5.6)
   quota/          # shared-pool ledger, governor, tranches, token bucket, bin packing (§5.7)
   persistence/    # PostgreSQL system-of-record: file_ledger, quota_ledger, dead_letter, DDL (§3.3)
-  summarise/      # tier-1 driver: skip/spend/hold/dead-letter spend loop (§5.2)
+  summarise/      # tiers 1-3 drivers: file/module/service, content-hash cascade keying (§5.2)
   answer/         # graph-planned retrieval, synthesis, citation + groundedness gates, cache (§5.4)
   flows/          # flow identification, tier-4 generation, architect review, invalidation (§Phase 7)
   freshness/      # git-diff-driven incremental reindex, cascade deletes, reconcile, staleness (§5.9)
+  orchestration/  # durable indexing workflow: checkpoint, resume, continue-as-new, park (§5.7)
+  observability/  # metrics collector (token/persona/latency/refusal), /metrics, OTel seam (§7.1)
   failures.py     # failure taxonomy: quota-exhausted / transient / content (§5.8)
   eval/           # golden-set schema, recall@k / MRR, harness (§7)
-  api/            # FastAPI app: /healthz, /search, /ask (+ SSE), /review (architect), R6
+  api/            # FastAPI app: /healthz, /search, /ask (+ SSE), /review, /metrics (R6)
   cli.py          # `vectural-ingest` — run ingestion, print a coverage summary
   demo.py         # `python -m backend.demo` — ingest+graph+search+summarise, fully offline
 tests/            # offline unit tests + synthetic estate fixtures
@@ -110,19 +119,21 @@ Supported languages: Python, JavaScript, TypeScript, TSX, Java, Go, Ruby, C#,
 Kotlin, Rust. Unsupported/unknown files still get whole-file module chunks so
 they remain lexically searchable.
 
-Not yet built: tiers 2-3 driver generalization (only tier-1 and tier-4 drivers
-exist so far), **Temporal orchestration** to make the spend loop and the reindex
-durable/resumable (§5.7 — the logic is written as pure functions ready to wrap),
-and OTel→SigNoz observability (§7.1). Phase 4 (prompt calibration) and any real
-spend require the company gateway and cannot be done here. The production infra
-adapters still to wire behind the existing protocols/seams: the `opensearch`-backed
-`SearchBackend` (incl. delete-by-query for the §5.9 cascade), the BGE-M3 `Embedder`
-client (and the reranker), the `neo4j`-backed `Neo4jGraphStore` (written behind the
-`neo4j` extra; its cascading detach mirrors the in-memory `delete_file`), the
-psycopg-backed persistence repositories, and the real HTTP gateway client behind the
-`LLMRouter` (the single egress). The Phase 6 offline path executes bounded scope via
-structural graph expansion; the real backend runs the validated generated Cypher on
-Neo4j. The webhook path parses real `git diff --name-status` via `git_name_status`.
+All of the plan's pipeline logic is now built and tested offline. What remains is
+**infrastructure adapters and real spend**, none of which can be exercised in this
+environment — each is a clearly-marked seam behind an existing protocol/extra:
+the `opensearch`-backed `SearchBackend` (incl. delete-by-query for the §5.9
+cascade), the BGE-M3 `Embedder` client (and the reranker), the `neo4j`-backed
+`Neo4jGraphStore` (behind the `neo4j` extra; its cascading detach mirrors the
+in-memory `delete_file`), the psycopg-backed persistence repositories, the real
+HTTP gateway client behind the `LLMRouter` (the single egress), the `temporalio`
+worker (behind the `temporal` extra) over the deterministic workflow, and the
+OTel→SigNoz exporter (behind the `otel` extra) over the `MetricsCollector`
+snapshot. **Phase 4** (prompt calibration) and any **real token spend** require
+the company gateway and are out of scope by the §2 licence boundary. The Phase 6
+offline path executes bounded scope via structural graph expansion; the real
+backend runs the validated generated Cypher on Neo4j. The webhook path parses real
+`git diff --name-status` via `git_name_status`.
 
 ## Develop
 
@@ -144,6 +155,7 @@ uv run python -m backend.demo <estate-root> -m manifest.yaml --summarise  # Phas
 uv run python -m backend.demo <estate-root> -m manifest.yaml --ask "how does X work" --persona architect
 uv run python -m backend.demo <estate-root> -m manifest.yaml --flows  # Phase 7 review lifecycle
 uv run python -m backend.demo <estate-root> -m manifest.yaml --reindex "M<TAB>svc/f.py"  # §5.9 cascade
+uv run python -m backend.demo <estate-root> -m manifest.yaml --orchestrate  # §5.7 kill+resume
 ```
 
 See [`manifest.example.yaml`](manifest.example.yaml) for the manifest format.

@@ -9,12 +9,15 @@ estimate separates content tokens from the fixed ``prompt_overhead_tokens`` leve
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
 # Frozen after Phase 4 calibration in reality; bumping it invalidates every tier-1
 # summary (a budgeted event, §8 risk 1). Kept explicit so a change is deliberate.
 TIER1_PROMPT_VERSION = "file-v1"
+MODULE_PROMPT_VERSION = "module-v1"  # tier 2 (Haiku)
+SERVICE_PROMPT_VERSION = "service-v1"  # tier 3 (Sonnet)
 
 # The fixed per-call instruction overhead, in tokens (§5.2.1). Every token added
 # to the template costs this x file-count, so it is a budget line, not prose.
@@ -54,3 +57,89 @@ def estimate_tier1_cost(content: str) -> int:
     content_tokens = max(1, len(content.split()))
     # Input overhead + an allowance for the structured output.
     return content_tokens + PROMPT_OVERHEAD_TOKENS + 40
+
+
+# --------------------------------------------------------------------------- #
+# Tier 2 (module) and tier 3 (service) — aggregate lower-tier summaries (§5.2)
+# --------------------------------------------------------------------------- #
+
+
+class ModuleSummary(BaseModel):
+    """Tier-2 output: what a module (folder) is responsible for."""
+
+    responsibility: str = Field(min_length=1)
+    key_files: list[str] = Field(default_factory=list)
+
+
+class ServiceSummary(BaseModel):
+    """Tier-3 output: a plain-language business description of a service."""
+
+    description: str = Field(min_length=1)
+    capabilities: list[str] = Field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ModuleChildSummary:
+    """A tier-1 file summary tagged with its identity + content hash (tier-2 input)."""
+
+    path: str
+    content_hash: str
+    summary: FileSummary
+
+
+@dataclass(frozen=True)
+class ServiceChildSummary:
+    """A tier-2 module summary tagged with its identity + content hash (tier-3 input)."""
+
+    module_key: str
+    content_hash: str
+    summary: ModuleSummary
+
+
+def higher_content_hash(child_hashes: list[str], prompt_version: str) -> str:
+    """Key a higher-tier summary by its children's hashes + the prompt version.
+
+    Order-independent, so a module summary is stable regardless of file ordering
+    and regenerates only when a child file summary actually changes (§5.9)."""
+    joined = "|".join(sorted(child_hashes))
+    return hashlib.sha256(f"{joined}::{prompt_version}".encode()).hexdigest()[:16]
+
+
+def render_module_prompt(module_key: str, file_summaries: list[ModuleChildSummary]) -> str:
+    lines = "\n".join(f"- {c.path}: {c.summary.purpose}" for c in file_summaries)
+    return (
+        "Summarise this module's responsibility as JSON "
+        '{"responsibility": string, "key_files": [string]} from its file summaries.\n'
+        f"# module: {module_key}\n{lines}"
+    )
+
+
+def render_service_prompt(
+    service: str,
+    module_summaries: list[ServiceChildSummary],
+    *,
+    openapi_text: str | None = None,
+    readme_text: str | None = None,
+) -> str:
+    modules = "\n".join(f"- {c.module_key}: {c.summary.responsibility}" for c in module_summaries)
+    extra = ""
+    if openapi_text:
+        extra += f"\n# OPENAPI\n{openapi_text[:2000]}"
+    if readme_text:
+        extra += f"\n# README\n{readme_text[:2000]}"
+    return (
+        "Write a plain-language business description of this service as JSON "
+        '{"description": string, "capabilities": [string]} from its module '
+        "summaries (and any OpenAPI/README).\n"
+        f"# service: {service}\n# MODULES\n{modules}{extra}"
+    )
+
+
+def estimate_module_cost(file_summaries: list[ModuleChildSummary]) -> int:
+    body = sum(max(1, len(c.summary.purpose.split())) for c in file_summaries)
+    return body + PROMPT_OVERHEAD_TOKENS + 40
+
+
+def estimate_service_cost(module_summaries: list[ServiceChildSummary]) -> int:
+    body = sum(max(1, len(c.summary.responsibility.split())) for c in module_summaries)
+    return body + PROMPT_OVERHEAD_TOKENS + 60

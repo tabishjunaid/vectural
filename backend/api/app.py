@@ -28,6 +28,7 @@ from backend.api.schemas import HealthResponse, SearchRequest, SearchResponse
 from backend.domain.models import Persona
 from backend.flows.models import FlowNarrative
 from backend.flows.service import FlowNarrativeService, FlowNotFoundError
+from backend.observability.metrics import MetricsCollector, MetricsSnapshot
 from backend.retrieval.service import RetrievalService
 
 
@@ -62,6 +63,7 @@ def create_app(
     *,
     answer_service: AnswerService | None = None,
     flow_service: FlowNarrativeService | None = None,
+    metrics: MetricsCollector | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Vectural API",
@@ -71,10 +73,18 @@ def create_app(
     app.state.retrieval = retrieval
     app.state.answer_service = answer_service
     app.state.flow_service = flow_service
+    app.state.metrics = metrics
 
     @app.get("/healthz", response_model=HealthResponse, tags=["ops"])
     def healthz() -> HealthResponse:
         return HealthResponse()
+
+    @app.get("/metrics", response_model=MetricsSnapshot, tags=["ops"])
+    def metrics_endpoint() -> MetricsSnapshot:
+        collector = getattr(app.state, "metrics", None)
+        if not isinstance(collector, MetricsCollector):
+            raise HTTPException(status_code=501, detail="metrics not enabled")
+        return collector.snapshot()
 
     @app.post("/search", response_model=SearchResponse, tags=["retrieval"])
     def search(req: SearchRequest, service: RetrievalDep) -> SearchResponse:

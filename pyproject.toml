@@ -31,6 +31,16 @@ opensearch = [
 neo4j = [
     "neo4j>=5.24",
 ]
+# Durable orchestration under a real Temporal server. Optional — the workflow
+# logic is deterministic and tested with no Temporal running.
+temporal = [
+    "temporalio>=1.8",
+]
+# OpenTelemetry → SigNoz metrics export. Optional — the collector works standalone.
+otel = [
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27",
+]
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
@@ -65,7 +75,7 @@ plugins = ["pydantic.mypy"]
 # Optional infra clients (installed only via extras). Their absence must not
 # fail the type check of the in-memory/offline code paths.
 [[tool.mypy.overrides]]
-module = ["neo4j.*", "opensearchpy.*"]
+module = ["neo4j.*", "opensearchpy.*", "temporalio.*", "opentelemetry.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

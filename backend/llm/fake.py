@@ -49,6 +49,14 @@ def _default_responder(request: GatewayRequest) -> str:
                 "external_calls": [],
             }
         )
+    if request.task_type is TaskType.MODULE_SUMMARY:
+        return json.dumps(
+            {"responsibility": "Coordinates the module's operations.", "key_files": []}
+        )
+    if request.task_type is TaskType.SERVICE_SUMMARY:
+        return json.dumps(
+            {"description": "Delivers the service's business capability.", "capabilities": []}
+        )
     if request.task_type is TaskType.GROUNDEDNESS:
         return json.dumps({"grounded": True, "unsupported_claims": []})
     if request.task_type is TaskType.ENTITY_LINKING:
@@ -78,14 +86,20 @@ class FakeGatewayClient:
         *,
         fail_times: int = 0,
         malformed: bool = False,
+        crash_after: int | None = None,
     ) -> None:
         self._responder = responder or _default_responder
         self._fail_times = fail_times
         self._malformed = malformed
+        # Simulate a worker being killed mid-run: after this many calls, raise a
+        # non-retryable error (models a Temporal worker crash, for resume tests).
+        self._crash_after = crash_after
         self.calls = 0
 
     def complete(self, request: GatewayRequest) -> GatewayResult:
         self.calls += 1
+        if self._crash_after is not None and self.calls > self._crash_after:
+            raise RuntimeError("worker killed mid-workflow")
         if self.calls <= self._fail_times:
             raise TransientGatewayError("simulated transient error", status_code=503)
 
