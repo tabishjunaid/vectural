@@ -89,3 +89,61 @@ class InMemoryGraphStore:
     @property
     def node_count(self) -> int:
         return len(self._nodes)
+
+    @property
+    def edge_count(self) -> int:
+        return sum(len(dsts) for dsts in self._out.values())
+
+    def delete_node(self, kind: NodeKind, key: str) -> bool:
+        """Delete a node and **all referencing edges** in both directions (§5.9).
+
+        Deleting a node must never leave a dangling edge — the cascade is the
+        whole point (design-doc §4.4 "nodes + all referencing edges")."""
+        ref: NodeRef = (kind, key)
+        if ref not in self._nodes:
+            return False
+        node = self._nodes.pop(ref)
+        self._by_kind[kind] = [n for n in self._by_kind.get(kind, []) if n.key != key]
+
+        # Outgoing edges: drop ref from every destination's in-adjacency.
+        for (src, rel), dsts in list(self._out.items()):
+            if src == ref:
+                for dst in dsts:
+                    self._prune(self._in, (dst, rel), ref)
+                del self._out[(src, rel)]
+        # Incoming edges: drop ref from every source's out-adjacency.
+        for (dst, rel), srcs in list(self._in.items()):
+            if dst == ref:
+                for src in srcs:
+                    self._prune(self._out, (src, rel), ref)
+                del self._in[(dst, rel)]
+        del node
+        return True
+
+    def delete_file(self, path: str) -> int:
+        """Cascade-delete a File node: its Function nodes, then the File itself.
+
+        Returns the number of graph nodes removed. The owning Module/Service
+        nodes are left in place — they may still contain other files."""
+        removed = 0
+        for fn in [n for n in self.nodes(NodeKind.FUNCTION) if n.key.startswith(f"{path}#")]:
+            if self.delete_node(NodeKind.FUNCTION, fn.key):
+                removed += 1
+        if self.delete_node(NodeKind.FILE, path):
+            removed += 1
+        return removed
+
+    def file_keys(self) -> set[str]:
+        """Keys of all File nodes — for reconciliation against the git tree."""
+        return {n.key for n in self.nodes(NodeKind.FILE)}
+
+    @staticmethod
+    def _prune(
+        index: dict[tuple[NodeRef, EdgeKind], list[NodeRef]],
+        key: tuple[NodeRef, EdgeKind],
+        ref: NodeRef,
+    ) -> None:
+        if key in index:
+            index[key] = [r for r in index[key] if r != ref]
+            if not index[key]:
+                del index[key]

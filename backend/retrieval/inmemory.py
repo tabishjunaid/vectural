@@ -119,6 +119,27 @@ class InMemorySearchBackend:
             score += idf * (tf * (_BM25_K1 + 1)) / denom
         return score
 
+    def delete_by_file(self, service: str, path: str) -> int:
+        """Remove every chunk of a file (cascade delete on delete/rename, §5.9)."""
+        ids = [
+            cid
+            for cid, doc in self._docs.items()
+            if doc.chunk.service == service and doc.chunk.path == path
+        ]
+        for cid in ids:
+            self._remove(cid)
+        return len(ids)
+
+    def delete_service(self, service: str) -> int:
+        ids = [cid for cid, doc in self._docs.items() if doc.chunk.service == service]
+        for cid in ids:
+            self._remove(cid)
+        return len(ids)
+
+    def indexed_files(self) -> set[tuple[str, str]]:
+        """The (service, path) pairs currently indexed — for reconciliation."""
+        return {(doc.chunk.service, doc.chunk.path) for doc in self._docs.values()}
+
     def _remove(self, chunk_id: str) -> None:
         doc = self._docs.pop(chunk_id)
         self._total_length -= doc.length

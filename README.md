@@ -10,7 +10,7 @@ frontend is tracked separately in [`plan/ui-development-plan.md`](plan/ui-develo
 
 ## Backend status
 
-Three phases implemented, all fully testable offline (no gateway, no infra):
+Seven phases implemented, all fully testable offline (no gateway, no infra):
 
 - **Phase 1 — deterministic ingestion** (implementation-plan §5.1): estate → chunks
   + graph skeleton, **zero LLM calls**. The load-bearing foundation — bad chunk
@@ -23,6 +23,34 @@ Three phases implemented, all fully testable offline (no gateway, no infra):
   the **Cypher validation layer** (allowed labels, hop cap, read-only), call-graph
   / endpoint / topic extraction, and structural fast-path queries — "what depends
   on service X, three hops out" answered directly from the graph, still no LLM.
+- **Phase 5 — LLM routing + quota + summarisation** (§5.6, §5.7, §5.2, §5.8): the
+  **single gateway egress** (model selection, prompt versioning, synchronous token
+  accounting), the **quota governor** (one shared pool, weekly tranches that roll
+  forward but never borrow ahead, 30% serving reserve, token bucket), the
+  PostgreSQL ledger (§3.3), the failure taxonomy, and a tier-1 summarisation driver
+  that **resumes without duplicate spend**. Built against a fake gateway — zero
+  real spend, no network.
+- **Phase 6 — the answer path** (§5.3 steps 1-4, §5.4, §5.5, R1/R2/R6): graph-planned
+  retrieval (entity linking → Cypher generation → validation with retry+fallback →
+  bounded scope), persona-templated synthesis, and **two independent fail-closed R1
+  gates** between synthesis and release — deterministic **citation resolution** then
+  a separate-call **groundedness** check. Refusal is a first-class result naming the
+  likely owning services. Plus the semantic answer cache (§5.5, no-gateway fast path)
+  and a `/ask` endpoint (+ SSE stream) returning the four terminal states.
+- **Phase 7 — flow narratives + architect review** (§Phase 7, §4.4): identify
+  recurring cross-service flows from the graph, generate tier-4 narratives (Sonnet,
+  content-hash keyed), and gate them behind an **architect review workflow** — a
+  narrative is authoritative only once approved, and a code change flips it to
+  `needs_review` **without silently regenerating**. Only approved narratives are
+  served as citable evidence (fail-closed). Architect-only `/review` endpoints
+  mirror the review UI.
+- **Phase 8 / §5.9 — freshness & incremental reindex** (R3): a git diff drives the
+  reindex — added/modified re-chunk (skipping unchanged content hashes), deleted
+  **cascades** (chunks + graph nodes + all referencing edges), renamed carries the
+  summary forward when unchanged. Cascade invalidation flips affected flow narratives
+  to `needs_review` (reusing Phase 7), marks files for re-summarisation, and sets a
+  **visible staleness flag** on answers (serving continues, §4.4). Backstop:
+  a reconciliation sweep deletes index orphans no longer in the git tree.
 
 ```
 backend/          # the Python package (import root); pairs with the UI agent's frontend/
@@ -32,12 +60,28 @@ backend/          # the Python package (import root); pairs with the UI agent's 
   embedding/      # Embedder protocol (BGE-M3) + deterministic offline embedder
   retrieval/      # SearchBackend protocol, in-memory hybrid (BM25+kNN+RRF), rerank, service
   graph/          # Neo4j schema, Cypher validator (§5.2), extraction, structural queries (§5.5)
+  llm/            # the single gateway egress: router, model config, fake+real gateway (§5.6)
+  quota/          # shared-pool ledger, governor, tranches, token bucket, bin packing (§5.7)
+  persistence/    # PostgreSQL system-of-record: file_ledger, quota_ledger, dead_letter, DDL (§3.3)
+  summarise/      # tier-1 driver: skip/spend/hold/dead-letter spend loop (§5.2)
+  answer/         # graph-planned retrieval, synthesis, citation + groundedness gates, cache (§5.4)
+  flows/          # flow identification, tier-4 generation, architect review, invalidation (§Phase 7)
+  freshness/      # git-diff-driven incremental reindex, cascade deletes, reconcile, staleness (§5.9)
+  failures.py     # failure taxonomy: quota-exhausted / transient / content (§5.8)
   eval/           # golden-set schema, recall@k / MRR, harness (§7)
-  api/            # FastAPI app: /healthz, /search (persona-threaded, R6)
+  api/            # FastAPI app: /healthz, /search, /ask (+ SSE), /review (architect), R6
   cli.py          # `vectural-ingest` — run ingestion, print a coverage summary
-  demo.py         # `python -m backend.demo` — ingest+graph+index+search, fully offline
+  demo.py         # `python -m backend.demo` — ingest+graph+search+summarise, fully offline
 tests/            # offline unit tests + synthetic estate fixtures
 ```
+
+The LLM routing layer is the **only** component permitted a gateway client — that
+is what makes the model/licence boundary (§2) structural, not a convention.
+Callers pass a rendered prompt and get back a routed, accounted response; the
+quota governor gates them first, and every spend decrements one shared pool
+whether it was a Haiku or a Sonnet call. Everything runs against a deterministic
+`FakeGatewayClient` in tests, so the whole spend loop — including resume,
+dead-letter, and quota-hold — is exercised with zero real tokens.
 
 Graph construction layers extracted relationships (`CALLS`, `PUBLISHES`/`CONSUMES`,
 `EXPOSES`) on top of the Phase-1 skeleton: cross-service calls are resolved from
@@ -66,13 +110,19 @@ Supported languages: Python, JavaScript, TypeScript, TSX, Java, Go, Ruby, C#,
 Kotlin, Rust. Unsupported/unknown files still get whole-file module chunks so
 they remain lexically searchable.
 
-Not yet built (later phases): the LLM routing layer and gateway egress (§5.6),
-summarisation tiers (§5.2), graph-planned retrieval steps 1-4 (§5.3), the answer
-path with citation/groundedness gates (§5.4), quota governance (§5.7), and
-Temporal orchestration (§5.7). The production infra adapters still to wire behind
-the existing protocols/seams are the `opensearch`-backed `SearchBackend`, the
-BGE-M3 `Embedder` client, and the `neo4j`-backed graph store (`Neo4jGraphStore`,
-already written behind the `neo4j` extra — untested here as it needs a database).
+Not yet built: tiers 2-3 driver generalization (only tier-1 and tier-4 drivers
+exist so far), **Temporal orchestration** to make the spend loop and the reindex
+durable/resumable (§5.7 — the logic is written as pure functions ready to wrap),
+and OTel→SigNoz observability (§7.1). Phase 4 (prompt calibration) and any real
+spend require the company gateway and cannot be done here. The production infra
+adapters still to wire behind the existing protocols/seams: the `opensearch`-backed
+`SearchBackend` (incl. delete-by-query for the §5.9 cascade), the BGE-M3 `Embedder`
+client (and the reranker), the `neo4j`-backed `Neo4jGraphStore` (written behind the
+`neo4j` extra; its cascading detach mirrors the in-memory `delete_file`), the
+psycopg-backed persistence repositories, and the real HTTP gateway client behind the
+`LLMRouter` (the single egress). The Phase 6 offline path executes bounded scope via
+structural graph expansion; the real backend runs the validated generated Cypher on
+Neo4j. The webhook path parses real `git diff --name-status` via `git_name_status`.
 
 ## Develop
 
@@ -87,9 +137,13 @@ uv run mypy backend      # types
 # Run ingestion over an estate (needs a manifest.yaml mapping paths -> services):
 uv run vectural-ingest <estate-root> -m manifest.yaml --sample-chunks 10
 
-# End-to-end offline: ingest + graph + index + search (no OpenSearch/Neo4j/model pod):
+# End-to-end offline (no OpenSearch/Neo4j/Postgres/gateway/model pod):
 uv run python -m backend.demo <estate-root> -m manifest.yaml -q "how do refunds reverse"
 uv run python -m backend.demo <estate-root> -m manifest.yaml --depends-on <service> --hops 3
+uv run python -m backend.demo <estate-root> -m manifest.yaml --summarise  # Phase 5 spend loop
+uv run python -m backend.demo <estate-root> -m manifest.yaml --ask "how does X work" --persona architect
+uv run python -m backend.demo <estate-root> -m manifest.yaml --flows  # Phase 7 review lifecycle
+uv run python -m backend.demo <estate-root> -m manifest.yaml --reindex "M<TAB>svc/f.py"  # §5.9 cascade
 ```
 
 See [`manifest.example.yaml`](manifest.example.yaml) for the manifest format.

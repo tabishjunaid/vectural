@@ -6,11 +6,13 @@ property that the deterministic pipeline is fully testable in isolation.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from backend.domain.manifest import Manifest, load_manifest
+from backend.domain.models import NodeKind
 from backend.embedding import HashingEmbedder
 from backend.graph import StructuralQueries, build_graph
 from backend.graph.builder import GraphBuildResult
@@ -174,6 +176,49 @@ def graph_build(graph_estate: Path, graph_manifest: Manifest) -> GraphBuildResul
 @pytest.fixture
 def structural(graph_build: GraphBuildResult) -> StructuralQueries:
     return StructuralQueries(graph_build.store())
+
+
+@dataclass
+class AnswerEnv:
+    """The offline building blocks for assembling an AnswerService — each test
+    supplies its own gateway (to drive the refusal paths) and cache."""
+
+    retrieval: RetrievalService
+    structural: StructuralQueries
+    services: set[str]
+    embedder: HashingEmbedder
+    commit_sha: str
+
+
+@pytest.fixture
+def answer_env(graph_build: GraphBuildResult, structural: StructuralQueries) -> AnswerEnv:
+    embedder = HashingEmbedder()
+    backend = InMemorySearchBackend(embedder=embedder)
+    backend.index(graph_build.chunks)
+    retrieval = RetrievalService(
+        backend=backend, embedder=embedder, reranker=TokenOverlapReranker()
+    )
+    services = {n.key for n in graph_build.nodes if n.kind is NodeKind.SERVICE}
+    return AnswerEnv(retrieval, structural, services, embedder, "c0ffee")
+
+
+@pytest.fixture
+def flow_candidates(graph_build: GraphBuildResult, structural: StructuralQueries) -> list:
+    from backend.flows import identify_flows
+
+    return identify_flows(graph_build.store(), structural)
+
+
+@pytest.fixture
+def flow_service(graph_build: GraphBuildResult, structural: StructuralQueries):
+    """A flow service with both candidates generated (pending), fake gateway."""
+    from backend.flows import FlowNarrativeService, InMemoryFlowStore, identify_flows
+    from backend.llm import FakeGatewayClient, LLMRouter
+
+    candidates = identify_flows(graph_build.store(), structural)
+    service = FlowNarrativeService(store=InMemoryFlowStore(), router=LLMRouter(FakeGatewayClient()))
+    service.generate(candidates)
+    return service
 
 
 @pytest.fixture

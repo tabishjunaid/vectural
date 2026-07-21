@@ -1,18 +1,33 @@
 """FastAPI application factory.
 
-``create_app(retrieval)`` takes an already-wired :class:`RetrievalService`, so
-the same app runs over the OpenSearch backend in production and the in-memory
-backend in tests — the HTTP surface never knows which. This is the dependency
+``create_app(retrieval, answer_service=…)`` takes already-wired services, so the
+same app runs over the OpenSearch/Neo4j stack in production and the in-memory
+stack in tests — the HTTP surface never knows which. This is the dependency
 boundary that keeps the API testable with no infrastructure.
+
+- ``/search`` (Phase 2): ranked chunks, no synthesis.
+- ``/ask`` (Phase 6): the full answer path — returns one of the terminal states
+  (synthesized / instant / refusal) via the ``mode`` field.
+- ``/ask/stream``: the same result as Server-Sent Events (design-doc §6 SSE edge).
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable, Iterator
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
+from backend.answer.models import Answer
+from backend.answer.service import AnswerService
+from backend.api.answer_schemas import AskRequest
+from backend.api.review_schemas import ReviewAction
 from backend.api.schemas import HealthResponse, SearchRequest, SearchResponse
+from backend.domain.models import Persona
+from backend.flows.models import FlowNarrative
+from backend.flows.service import FlowNarrativeService, FlowNotFoundError
 from backend.retrieval.service import RetrievalService
 
 
@@ -23,16 +38,39 @@ def _get_retrieval(request: Request) -> RetrievalService:
     return service
 
 
+def _get_answer(request: Request) -> AnswerService:
+    service = getattr(request.app.state, "answer_service", None)
+    if not isinstance(service, AnswerService):
+        raise HTTPException(status_code=501, detail="answer path not enabled")
+    return service
+
+
+def _get_flows(request: Request) -> FlowNarrativeService:
+    service = getattr(request.app.state, "flow_service", None)
+    if not isinstance(service, FlowNarrativeService):
+        raise HTTPException(status_code=501, detail="flow review not enabled")
+    return service
+
+
 RetrievalDep = Annotated[RetrievalService, Depends(_get_retrieval)]
+AnswerDep = Annotated[AnswerService, Depends(_get_answer)]
+FlowsDep = Annotated[FlowNarrativeService, Depends(_get_flows)]
 
 
-def create_app(retrieval: RetrievalService) -> FastAPI:
+def create_app(
+    retrieval: RetrievalService,
+    *,
+    answer_service: AnswerService | None = None,
+    flow_service: FlowNarrativeService | None = None,
+) -> FastAPI:
     app = FastAPI(
-        title="Vectural Retrieval API",
+        title="Vectural API",
         version="0.1.0",
-        summary="Hybrid retrieval over the estate (Phase 2 — ranked chunks, no synthesis).",
+        summary="Retrieval + graph-planned cited answers over the estate.",
     )
     app.state.retrieval = retrieval
+    app.state.answer_service = answer_service
+    app.state.flow_service = flow_service
 
     @app.get("/healthz", response_model=HealthResponse, tags=["ops"])
     def healthz() -> HealthResponse:
@@ -52,4 +90,73 @@ def create_app(retrieval: RetrievalService) -> FastAPI:
             hits=hits,
         )
 
+    @app.post("/ask", response_model=Answer, tags=["answer"])
+    def ask(req: AskRequest, service: AnswerDep) -> Answer:
+        return service.answer(req.question, req.persona)
+
+    @app.post("/ask/stream", tags=["answer"])
+    def ask_stream(req: AskRequest, service: AnswerDep) -> StreamingResponse:
+        answer = service.answer(req.question, req.persona)
+        return StreamingResponse(_sse(answer), media_type="text/event-stream")
+
+    # -- architect flow-narrative review (§Phase 7) ------------------------- #
+
+    @app.get("/review/queue", response_model=list[FlowNarrative], tags=["review"])
+    def review_queue(flows: FlowsDep) -> list[FlowNarrative]:
+        return flows.queue()
+
+    @app.get("/review/{flow_id}", response_model=FlowNarrative, tags=["review"])
+    def review_get(flow_id: str, flows: FlowsDep) -> FlowNarrative:
+        narrative = flows.get(flow_id)
+        if narrative is None:
+            raise HTTPException(status_code=404, detail=f"flow {flow_id} not found")
+        return narrative
+
+    @app.post("/review/{flow_id}/approve", response_model=FlowNarrative, tags=["review"])
+    def review_approve(flow_id: str, action: ReviewAction, flows: FlowsDep) -> FlowNarrative:
+        _require_architect(action.persona)
+        return _flow_action(lambda: flows.approve(flow_id, action.architect))
+
+    @app.post("/review/{flow_id}/request-changes", response_model=FlowNarrative, tags=["review"])
+    def review_request_changes(
+        flow_id: str, action: ReviewAction, flows: FlowsDep
+    ) -> FlowNarrative:
+        _require_architect(action.persona)
+        if not action.reason:
+            raise HTTPException(status_code=422, detail="reason required for request-changes")
+        return _flow_action(
+            lambda: flows.request_changes(flow_id, action.architect, action.reason or "")
+        )
+
+    @app.post("/review/{flow_id}/reject", response_model=FlowNarrative, tags=["review"])
+    def review_reject(flow_id: str, action: ReviewAction, flows: FlowsDep) -> FlowNarrative:
+        _require_architect(action.persona)
+        return _flow_action(lambda: flows.reject(flow_id, action.architect, action.reason))
+
     return app
+
+
+def _require_architect(persona: Persona) -> None:
+    # The review surface is architect-only (the only write surface in the product).
+    if persona is not Persona.ARCHITECT:
+        raise HTTPException(status_code=403, detail="flow review is architect-only")
+
+
+def _flow_action(action: Callable[[], FlowNarrative]) -> FlowNarrative:
+    try:
+        return action()
+    except FlowNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"flow {exc} not found") from exc
+
+
+def _sse(answer: Answer) -> Iterator[str]:
+    """Emit the answer as SSE events: mode first, then the text token-by-token,
+    then a final event carrying citations / refusal metadata."""
+    yield _event("mode", {"mode": answer.mode.value, "persona": answer.persona.value})
+    for token in answer.text.split(" "):
+        yield _event("token", {"t": token + " "})
+    yield _event("done", answer.model_dump(mode="json"))
+
+
+def _event(name: str, data: dict[str, object]) -> str:
+    return f"event: {name}\ndata: {json.dumps(data)}\n\n"
