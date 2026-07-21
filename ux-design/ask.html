@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Ask — Codebase Intelligence Platform</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="shared/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+
+    <nav class="rail">
+      <div class="rail-brand">Codebase Intelligence</div>
+      <button class="rail-new" onclick="location.reload()">+ New ask</button>
+
+      <div class="rail-section-label">History</div>
+      <div class="rail-history-item">What depends on checkout-svc, three hops out?</div>
+      <div class="rail-history-item">How does a refund reversal propagate?</div>
+      <div class="rail-history-item">SLA for checkout-svc payment confirmation?</div>
+
+      <div class="rail-nav">
+        <a href="ask.html" class="active">Ask</a>
+        <a href="coverage.html">Coverage <span class="badge" id="coverageBadge">78%</span></a>
+        <a href="review.html" id="navReview">Review <span class="badge">4</span></a>
+      </div>
+    </nav>
+
+    <div class="main-col">
+      <header class="topbar">
+        <div class="topbar-title">Ask</div>
+        <div class="topbar-right">
+          <a class="coverage-chip" href="coverage.html"><span class="dot"></span> Coverage: 78%</a>
+          <span class="persona-pill" id="personaPillTop">Engineer</span>
+        </div>
+      </header>
+
+      <div class="main-scroll">
+        <div class="main-inner">
+
+          <div class="scenario-bar">
+            <button class="scenario-btn active" data-scenario="normal" onclick="setScenario('normal')">Normal answer</button>
+            <button class="scenario-btn" data-scenario="streaming" onclick="setScenario('streaming')">Simulate streaming</button>
+            <button class="scenario-btn" data-scenario="instant" onclick="setScenario('instant')">Instant answer (cache/structural)</button>
+            <button class="scenario-btn" data-scenario="refusal" onclick="setScenario('refusal')">Refusal (no coverage)</button>
+          </div>
+
+          <!-- prior turn, always shown collapsed to demonstrate history-turn behavior -->
+          <div class="turn collapsed" id="priorTurn">
+            <div class="question-bubble"><span class="who">You</span>What depends on checkout-svc, three hops out?</div>
+            <div class="answer-card">
+              <span class="answer-mode-tag">● Structural result</span>
+              <div class="answer-body"></div>
+            </div>
+            <button class="show-full-btn" onclick="document.getElementById('priorTurn').classList.remove('collapsed')">Show full answer ↓</button>
+          </div>
+
+          <!-- live/active turn, driven by scenario + persona -->
+          <div class="turn" id="liveTurn"></div>
+
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="composer-inner">
+          <div class="persona-switcher" id="personaSwitcher"></div>
+          <input type="text" placeholder="Ask about the codebase..." value="How does a refund reversal propagate across services?" />
+          <button class="composer-send" onclick="setScenario(currentScenario)">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
+  <div class="drawer" id="drawer">
+    <button class="drawer-close" onclick="closeDrawer()">×</button>
+    <h4 id="drawerTitle">—</h4>
+    <div class="drawer-service" id="drawerService">—</div>
+    <div class="drawer-meta-row"><span class="k">Commit</span><span id="drawerCommit">—</span></div>
+    <div class="drawer-meta-row"><span class="k">Indexed</span><span id="drawerIndexed">—</span></div>
+    <div class="drawer-meta-row"><span class="k">Status</span><span id="drawerStatus">—</span></div>
+    <div class="drawer-chunk" id="drawerChunk">—</div>
+  </div>
+
+  <script src="shared/mock-data.js"></script>
+  <script>
+    let currentPersona = "engineer";
+    let currentScenario = "normal";
+
+    // ---- prior (collapsed) turn: static instant-answer example ----
+    document.querySelector("#priorTurn .answer-body").innerHTML = renderMarkdown(INSTANT_ANSWER.markdown);
+
+    // ---- persona switcher ----
+    const switcherEl = document.getElementById("personaSwitcher");
+    PERSONAS.forEach((p) => {
+      const btn = document.createElement("button");
+      btn.textContent = p.label;
+      btn.dataset.persona = p.id;
+      btn.onclick = () => setPersona(p.id);
+      switcherEl.appendChild(btn);
+    });
+
+    function setPersona(id) {
+      currentPersona = id;
+      document.querySelectorAll("#personaSwitcher button").forEach((b) => b.classList.toggle("active", b.dataset.persona === id));
+      document.getElementById("personaPillTop").textContent = PERSONAS.find((p) => p.id === id).label;
+      document.getElementById("navReview").style.display = id === "architect" ? "flex" : "none";
+      if (currentScenario === "normal" || currentScenario === "streaming") setScenario(currentScenario);
+    }
+
+    function setScenario(name) {
+      currentScenario = name;
+      document.querySelectorAll(".scenario-btn").forEach((b) => b.classList.toggle("active", b.dataset.scenario === name));
+      if (name === "normal") renderNormalTurn(currentPersona, false);
+      else if (name === "streaming") renderNormalTurn(currentPersona, true);
+      else if (name === "instant") renderInstantTurn();
+      else if (name === "refusal") renderRefusalTurn();
+    }
+
+    // ---- Screen states ----
+
+    function renderNormalTurn(persona, simulateStream) {
+      const data = NORMAL_ANSWERS[persona];
+      const live = document.getElementById("liveTurn");
+      live.className = "turn";
+      live.innerHTML = `
+        <div class="question-bubble"><span class="who">You</span>${data.question}</div>
+        <div class="answer-card">
+          <span class="answer-mode-tag ${simulateStream ? "streaming" : ""}" id="modeTag">${simulateStream ? "● streaming…" : "● Synthesized answer"}</span>
+          <div class="answer-outline" id="answerOutline" style="display:none"></div>
+          <div class="answer-body" id="answerBody"></div>
+          <div class="sources-rail" id="sourcesRail" style="display:${simulateStream ? "none" : "block"}"></div>
+        </div>
+      `;
+
+      if (!simulateStream) {
+        document.getElementById("answerBody").innerHTML = renderMarkdown(data.markdown);
+        buildOutline(data.markdown);
+        document.getElementById("sourcesRail").innerHTML = renderSourcesRail(data.citationIds, persona);
+        return;
+      }
+
+      // streaming simulation: reveal the raw markdown source progressively,
+      // buffering to whole-line boundaries so fences/bold markers don't
+      // render mid-token, then swap to the fully parsed version on finish.
+      const full = data.markdown;
+      const lines = full.split("\n");
+      let shown = "";
+      let i = 0;
+      const bodyEl = document.getElementById("answerBody");
+      const timer = setInterval(() => {
+        shown += (i > 0 ? "\n" : "") + lines[i];
+        i++;
+        bodyEl.innerHTML = `<p style="white-space:pre-wrap">${shown.replace(/</g, "&lt;")}<span class="stream-cursor"></span></p>`;
+        bodyEl.parentElement.scrollTop = bodyEl.parentElement.scrollHeight;
+        if (i >= lines.length) {
+          clearInterval(timer);
+          document.getElementById("modeTag").textContent = "● Synthesized answer";
+          document.getElementById("modeTag").classList.remove("streaming");
+          bodyEl.innerHTML = renderMarkdown(full);
+          buildOutline(full);
+          const rail = document.getElementById("sourcesRail");
+          rail.style.display = "block";
+          rail.innerHTML = renderSourcesRail(data.citationIds, persona);
+        }
+      }, 90);
+    }
+
+    function buildOutline(markdown) {
+      const headings = [...markdown.matchAll(/^## (.*)$/gm)].map((m) => m[1]);
+      const el = document.getElementById("answerOutline");
+      if (!el) return;
+      if (headings.length > 2) {
+        el.style.display = "flex";
+        el.innerHTML = '<span class="outline-label">In this answer</span>' + headings.map((h) => `<a href="#">${h}</a>`).join("");
+      } else {
+        el.style.display = "none";
+      }
+    }
+
+    function renderInstantTurn() {
+      const live = document.getElementById("liveTurn");
+      live.className = "turn";
+      live.innerHTML = `
+        <div class="question-bubble"><span class="who">You</span>${INSTANT_ANSWER.question}</div>
+        <div class="answer-card">
+          <span class="answer-mode-tag">● ${INSTANT_ANSWER.mode} · no gateway call</span>
+          <div class="answer-body">${renderMarkdown(INSTANT_ANSWER.markdown)}</div>
+        </div>
+      `;
+    }
+
+    function renderRefusalTurn() {
+      const live = document.getElementById("liveTurn");
+      live.className = "turn";
+      const text = refusalTextForService(REFUSAL_SCENARIO.serviceName);
+      live.innerHTML = `
+        <div class="question-bubble"><span class="who">You</span>${REFUSAL_SCENARIO.question}</div>
+        <div class="refusal-card">
+          <div class="refusal-kicker">Not answered · citation could not be resolved</div>
+          <p>${text}</p>
+          <a class="coverage-link" href="coverage.html?service=${REFUSAL_SCENARIO.serviceName}">View coverage schedule for ${REFUSAL_SCENARIO.serviceName} →</a>
+        </div>
+      `;
+    }
+
+    // ---- sources rail, persona-dependent density ----
+    function renderSourcesRail(citationIds, persona) {
+      const rows = citationIds.map((id) => {
+        const c = CITATIONS[id];
+        const label = c.kind === "code" ? `${c.service}/${c.file}:${c.line}` : `${c.service} → flow: "${c.flow}"`;
+        const shortLabel = c.kind === "code" ? c.service : `${c.service} · flow`;
+        const badges = [
+          c.stale ? '<span class="badge-mini badge-stale">may be stale</span>' : "",
+          c.needsReview ? '<span class="badge-mini badge-review">needs review</span>' : "",
+        ].join("");
+        const reviewLink = persona === "architect" && c.needsReview
+          ? ` <a href="review.html#refund-propagation" style="font-size:11.5px;font-weight:700;color:var(--accent)">Review →</a>` : "";
+
+        if (persona === "bo") return null; // collapsed separately below
+        const shown = persona === "po" ? shortLabel : label;
+        return `<div class="source-row" onclick="openCitationById(${id})"><span class="num">[${id}]</span> ${shown} ${badges}${reviewLink}</div>`;
+      });
+
+      if (persona === "bo") {
+        const count = citationIds.length;
+        return `
+          <button class="sources-collapsed-link" onclick="this.outerHTML = renderExpandedSources(${JSON.stringify(citationIds)})">Sources (${count}) ▾</button>
+        `;
+      }
+
+      const label = persona === "engineer" || persona === "architect" ? "Sources" : "Referenced services / flows";
+      return `<div class="sources-rail-label">${label}</div>` + rows.filter(Boolean).join("");
+    }
+
+    function renderExpandedSources(citationIds) {
+      const rows = citationIds.map((id) => {
+        const c = CITATIONS[id];
+        const label = c.kind === "code" ? c.service : `${c.service} · flow: "${c.flow}"`;
+        return `<div class="source-row" onclick="openCitationById(${id})"><span class="num">[${id}]</span> ${label}</div>`;
+      }).join("");
+      return `<div class="sources-rail-label">Sources</div>${rows}`;
+    }
+
+    // ---- citation drawer ----
+    function openCitationById(id) {
+      const c = CITATIONS[id];
+      document.getElementById("drawerTitle").textContent = c.kind === "code" ? `${c.file}:${c.line}` : `Flow: ${c.flow}`;
+      document.getElementById("drawerService").textContent = c.service;
+      document.getElementById("drawerCommit").textContent = c.commit;
+      document.getElementById("drawerIndexed").textContent = c.indexedAt;
+      document.getElementById("drawerStatus").innerHTML = [
+        c.stale ? '<span class="badge-mini badge-stale">may be stale</span>' : '<span class="badge-mini" style="color:var(--green);background:#ecf7f0;border:1px solid #cdeed9">current</span>',
+        c.needsReview ? '<span class="badge-mini badge-review">needs review</span>' : "",
+      ].join(" ");
+      document.getElementById("drawerChunk").textContent = c.kind === "code"
+        ? `# ${c.file}, line ${c.line}\n...\n${c.file.includes("refund") ? "def reverse_refund(refund_id: str) -> None:\n    ..." : "def handle_event(evt) -> None:\n    ..."}\n...`
+        : `Flow narrative excerpt — "${c.flow}"\nContributing services shown in the Flow Narrative Review screen.`;
+      document.getElementById("drawer").classList.add("open");
+      document.getElementById("drawerBackdrop").classList.add("open");
+    }
+    window.openCitation = (chipEl) => openCitationById(Number(chipEl.dataset.cite));
+    function closeDrawer() {
+      document.getElementById("drawer").classList.remove("open");
+      document.getElementById("drawerBackdrop").classList.remove("open");
+    }
+
+    // ---- init ----
+    setPersona("engineer");
+    setScenario("normal");
+  </script>
+</body>
+</html>
