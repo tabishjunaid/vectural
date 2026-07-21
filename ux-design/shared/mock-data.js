@@ -270,16 +270,21 @@ function renderMarkdown(md) {
 
   html = html.replace(/^### (.*)$/gm, "<h4>$1</h4>");
   html = html.replace(/^## (.*)$/gm, "<h3>$1</h3>");
-  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // [\s\S] instead of "." so bold survives a source line-wrap (e.g. "**Refund\n  propagation**").
+  html = html.replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
 
-  html = html.replace(/(^|\n)((?:- .*(?:\n|$))+)/g, (_, pre, block) => {
-    const items = block
-      .trim()
-      .split("\n")
-      .map((l) => "<li>" + l.replace(/^- /, "") + "</li>")
-      .join("");
-    return pre + "<ul>" + items + "</ul>";
+  // List blocks: a line starting "- " begins an item; an indented
+  // continuation line (soft-wrapped source text) joins the previous item
+  // rather than starting a new one or falling out of the list.
+  html = html.replace(/(^|\n)((?:- .*|  +\S.*))((?:\n(?:- .*|  +\S.*))*)/g, (_, pre, first, rest) => {
+    const lines = (first + rest).split("\n");
+    const items = [];
+    lines.forEach((line) => {
+      if (/^- /.test(line)) items.push(line.replace(/^- /, ""));
+      else items[items.length - 1] += " " + line.trim();
+    });
+    return pre + "<ul>" + items.map((i) => `<li>${i}</li>`).join("") + "</ul>";
   });
 
   html = html
@@ -289,7 +294,10 @@ function renderMarkdown(md) {
       if (!t) return "";
       if (/^<(h3|h4|ul)/.test(t)) return t;
       if (/^@@CODEBLOCK\d+@@$/.test(t)) return t;
-      return "<p>" + t.replace(/\n/g, "<br>") + "</p>";
+      // Soft-wrap: join source line breaks within a paragraph into spaces
+      // so rendering reflows naturally instead of hard-breaking at whatever
+      // column the mock markdown happened to be authored at.
+      return "<p>" + t.replace(/\s*\n\s*/g, " ") + "</p>";
     })
     .join("\n");
 

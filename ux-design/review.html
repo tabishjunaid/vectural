@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Flow Narrative Review — Codebase Intelligence Platform</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="shared/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+
+    <nav class="rail">
+      <div class="rail-brand">Codebase Intelligence</div>
+      <button class="rail-new" onclick="location.href='ask.html'">+ New ask</button>
+
+      <div class="rail-section-label">History</div>
+      <div class="rail-history-item">What depends on checkout-svc, three hops out?</div>
+      <div class="rail-history-item">How does a refund reversal propagate?</div>
+      <div class="rail-history-item">SLA for checkout-svc payment confirmation?</div>
+
+      <div class="rail-nav">
+        <a href="ask.html">Ask</a>
+        <a href="coverage.html">Coverage <span class="badge">78%</span></a>
+        <a href="review.html" class="active">Review <span class="badge">4</span></a>
+      </div>
+    </nav>
+
+    <div class="main-col">
+      <header class="topbar">
+        <div class="topbar-title">Flow Narrative Review</div>
+        <div class="topbar-right">
+          <span class="persona-pill">Architect only</span>
+        </div>
+      </header>
+
+      <div class="main-scroll">
+        <div class="main-inner" style="max-width:1040px">
+          <p style="color:var(--text-dim);font-size:13px;margin-top:0">
+            Tier-4 flow narratives are not authoritative until an architect approves them.
+            When underlying code changes, a narrative is flagged <code>needs_review</code>
+            and never silently regenerated — this is the only write surface in the product;
+            every other screen is read-only Q&amp;A.
+          </p>
+
+          <div class="panel review-layout" style="min-height:480px">
+            <div class="review-queue-list" id="queueList"></div>
+            <div class="review-detail" id="detail"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
+  <div class="drawer" id="drawer">
+    <button class="drawer-close" onclick="closeDrawer()">×</button>
+    <h4 id="drawerTitle">—</h4>
+    <div class="drawer-service" id="drawerService">—</div>
+    <div class="drawer-meta-row"><span class="k">Commit</span><span id="drawerCommit">—</span></div>
+    <div class="drawer-meta-row"><span class="k">Indexed</span><span id="drawerIndexed">—</span></div>
+    <div class="drawer-meta-row"><span class="k">Status</span><span id="drawerStatus">—</span></div>
+    <div class="drawer-chunk" id="drawerChunk">—</div>
+  </div>
+
+  <script src="shared/mock-data.js"></script>
+  <script>
+    let activeId = (location.hash || "").replace("#", "") || REVIEW_QUEUE[0].id;
+    if (!REVIEW_QUEUE.find((r) => r.id === activeId)) activeId = REVIEW_QUEUE[0].id;
+
+    function renderQueueList() {
+      document.getElementById("queueList").innerHTML = REVIEW_QUEUE.map((item) => `
+        <div class="queue-item ${item.id === activeId ? "active" : ""}" onclick="selectItem('${item.id}')">
+          <div class="title">${item.status === "needs_review" ? "⚠ " : "○ "}${item.title}</div>
+          <div class="status-line ${item.status}">${item.status === "needs_review" ? "needs review" : "pending (new)"}</div>
+        </div>
+      `).join("");
+    }
+
+    function selectItem(id) {
+      activeId = id;
+      renderQueueList();
+      renderDetail();
+    }
+
+    function renderDetail() {
+      const item = REVIEW_QUEUE.find((r) => r.id === activeId);
+      const sources = item.citationIds.length
+        ? `<div class="sources-rail" style="border-top:none;padding-top:0;margin-top:14px">
+             <div class="sources-rail-label">Sources</div>
+             ${item.citationIds.map((id) => {
+               const c = CITATIONS[id];
+               const label = c.kind === "code" ? `${c.service}/${c.file}:${c.line}` : `${c.service} → flow: "${c.flow}"`;
+               return `<div class="source-row" onclick="openCitationById(${id})"><span class="num">[${id}]</span> ${label}</div>`;
+             }).join("")}
+           </div>`
+        : "";
+
+      document.getElementById("detail").innerHTML = `
+        <div class="review-detail-header">
+          <h3>${item.title}</h3>
+          <div class="reason">${item.status === "needs_review" ? "⚠ " : ""}${item.reason}</div>
+        </div>
+
+        <div class="review-meta-grid">
+          <div><span class="k">Contributing services</span>${item.contributingServices.join(", ")}</div>
+          <div><span class="k">Trigger</span>${item.trigger}</div>
+          <div><span class="k">Last approved</span>${item.lastApproved || "Never approved"}</div>
+          <div><span class="k">Status</span>${item.status === "needs_review" ? "Needs re-review" : "Pending first review"}</div>
+        </div>
+
+        <div class="answer-body">${renderMarkdown(item.markdown)}</div>
+        ${sources}
+
+        <div class="review-actions">
+          <button class="btn-approve" onclick="mockAction('approved')">Approve</button>
+          <button class="btn-request" onclick="mockAction('sent back for changes')">Request changes</button>
+          <button class="btn-reject" onclick="mockAction('rejected')">Reject</button>
+        </div>
+      `;
+    }
+
+    function mockAction(verb) {
+      alert(`Mock action — "${document.querySelector('.review-detail-header h3').textContent}" would be marked ${verb}. (No backend in this mockup.)`);
+    }
+
+    function openCitationById(id) {
+      const c = CITATIONS[id];
+      document.getElementById("drawerTitle").textContent = c.kind === "code" ? `${c.file}:${c.line}` : `Flow: ${c.flow}`;
+      document.getElementById("drawerService").textContent = c.service;
+      document.getElementById("drawerCommit").textContent = c.commit;
+      document.getElementById("drawerIndexed").textContent = c.indexedAt;
+      document.getElementById("drawerStatus").innerHTML = c.stale
+        ? '<span class="badge-mini badge-stale">may be stale</span>'
+        : '<span class="badge-mini" style="color:var(--green);background:#ecf7f0;border:1px solid #cdeed9">current</span>';
+      document.getElementById("drawerChunk").textContent = c.kind === "code"
+        ? `# ${c.file}, line ${c.line}\n...\ndef reverse_refund(refund_id: str) -> None:\n    ...`
+        : `Flow narrative excerpt — "${c.flow}"`;
+      document.getElementById("drawer").classList.add("open");
+      document.getElementById("drawerBackdrop").classList.add("open");
+    }
+    window.openCitation = (chipEl) => openCitationById(Number(chipEl.dataset.cite));
+    function closeDrawer() {
+      document.getElementById("drawer").classList.remove("open");
+      document.getElementById("drawerBackdrop").classList.remove("open");
+    }
+
+    renderQueueList();
+    renderDetail();
+  </script>
+</body>
+</html>

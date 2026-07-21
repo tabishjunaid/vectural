@@ -430,16 +430,19 @@ html, body {
 }
 .composer-send:hover { opacity: .92; }
 
-.persona-switcher {
-  display: flex; gap: 2px; background: var(--bg); border-radius: 9px; padding: 3px;
+.persona-select {
   flex: 0 0 auto;
+  appearance: none; -webkit-appearance: none;
+  background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235b6472'/%3E%3C/svg%3E") no-repeat right 10px center;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 26px 8px 12px;
+  font-size: 12.5px; font-weight: 700;
+  color: var(--accent);
+  cursor: pointer;
 }
-.persona-switcher button {
-  border: none; background: transparent; font-size: 12px; font-weight: 600;
-  color: var(--text-dim); padding: 6px 9px; border-radius: 7px; cursor: pointer;
-  white-space: nowrap;
-}
-.persona-switcher button.active { background: var(--panel); color: var(--accent); box-shadow: 0 1px 2px rgba(20,23,31,.08); }
+.persona-select:hover { border-color: var(--accent); }
+.persona-select:focus { outline: 2px solid var(--accent-weak); }
 
 /* ---------- Screen 2: Coverage Explorer ---------- */
 .filter-row { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; }

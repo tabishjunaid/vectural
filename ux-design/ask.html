@@ -62,7 +62,7 @@
 
       <div class="composer">
         <div class="composer-inner">
-          <div class="persona-switcher" id="personaSwitcher"></div>
+          <select class="persona-select" id="personaSelect" aria-label="Persona"></select>
           <input type="text" placeholder="Ask about the codebase..." value="How does a refund reversal propagate across services?" />
           <button class="composer-send" onclick="setScenario(currentScenario)">Send</button>
         </div>
@@ -89,19 +89,19 @@
     // ---- prior (collapsed) turn: static instant-answer example ----
     document.querySelector("#priorTurn .answer-body").innerHTML = renderMarkdown(INSTANT_ANSWER.markdown);
 
-    // ---- persona switcher ----
-    const switcherEl = document.getElementById("personaSwitcher");
+    // ---- persona switcher (dropdown — leaves room for the question input) ----
+    const selectEl = document.getElementById("personaSelect");
     PERSONAS.forEach((p) => {
-      const btn = document.createElement("button");
-      btn.textContent = p.label;
-      btn.dataset.persona = p.id;
-      btn.onclick = () => setPersona(p.id);
-      switcherEl.appendChild(btn);
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.label;
+      selectEl.appendChild(opt);
     });
+    selectEl.onchange = () => setPersona(selectEl.value);
 
     function setPersona(id) {
       currentPersona = id;
-      document.querySelectorAll("#personaSwitcher button").forEach((b) => b.classList.toggle("active", b.dataset.persona === id));
+      selectEl.value = id;
       document.getElementById("personaPillTop").textContent = PERSONAS.find((p) => p.id === id).label;
       document.getElementById("navReview").style.display = id === "architect" ? "flex" : "none";
       if (currentScenario === "normal" || currentScenario === "streaming") setScenario(currentScenario);
