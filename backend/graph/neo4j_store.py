@@ -9,10 +9,12 @@ every read query routed through here is expected to have passed
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from backend.domain.models import Edge, Node
+from backend.domain.models import Edge, EdgeKind, Node, NodeKind
 from backend.graph.schema import schema_statements
+from backend.graph.store import NodeRef
 
 if TYPE_CHECKING:
     from neo4j import Driver
@@ -79,5 +81,91 @@ class Neo4jGraphStore:
         with self._driver.session(database=self._database) as session:
             return [record.data() for record in session.run(cypher, **params)]
 
+    def load(self, nodes: list[Node], edges: list[Edge]) -> None:
+        """Apply schema, then upsert the whole graph (rebuild-from-git, §6)."""
+        self.apply_schema()
+        self.upsert_nodes(nodes)
+        self.upsert_edges(edges)
+
+    # -- GraphStore protocol (via Cypher) ----------------------------------- #
+
+    def has_node(self, kind: NodeKind, key: str) -> bool:
+        rows = self.run_read(
+            f"MATCH (n:{kind.value} {{key: $key}}) RETURN count(n) AS c", key=key
+        )
+        return bool(rows and rows[0]["c"] > 0)
+
+    def nodes(self, kind: NodeKind) -> list[Node]:
+        rows = self.run_read(f"MATCH (n:{kind.value}) RETURN properties(n) AS p")
+        return [_to_node(kind, row["p"]) for row in rows]
+
+    def out_neighbors(self, kind: NodeKind, key: str, rel: EdgeKind) -> list[NodeRef]:
+        rows = self.run_read(
+            f"MATCH (n:{kind.value} {{key: $key}})-[:{rel.value}]->(m) "
+            "RETURN labels(m) AS labels, m.key AS key",
+            key=key,
+        )
+        return [_ref(row) for row in rows]
+
+    def in_neighbors(self, kind: NodeKind, key: str, rel: EdgeKind) -> list[NodeRef]:
+        rows = self.run_read(
+            f"MATCH (n:{kind.value} {{key: $key}})<-[:{rel.value}]-(m) "
+            "RETURN labels(m) AS labels, m.key AS key",
+            key=key,
+        )
+        return [_ref(row) for row in rows]
+
+    # -- cascade deletes (§5.9) --------------------------------------------- #
+
+    def delete_node(self, kind: NodeKind, key: str) -> bool:
+        rows = self.run_read(
+            f"MATCH (n:{kind.value} {{key: $key}}) DETACH DELETE n RETURN count(n) AS c", key=key
+        )
+        return bool(rows and rows[0]["c"] > 0)
+
+    def delete_file(self, path: str) -> int:
+        """Delete a File and its Functions with all referencing edges (detach)."""
+        rows = self.run_read(
+            "MATCH (f:File {key: $path}) "
+            "OPTIONAL MATCH (f)-[:DEFINES]->(fn:Function) "
+            "WITH collect(DISTINCT fn) AS fns, f "
+            "DETACH DELETE f "
+            "WITH fns UNWIND fns AS fn DETACH DELETE fn RETURN count(fn) AS c",
+            path=path,
+        )
+        deleted_functions = rows[0]["c"] if rows else 0
+        return int(deleted_functions) + 1
+
+    def file_keys(self) -> set[str]:
+        rows = self.run_read("MATCH (f:File) RETURN f.key AS key")
+        return {str(row["key"]) for row in rows}
+
     def close(self) -> None:
         self._driver.close()
+
+
+def _ref(row: dict[str, Any]) -> NodeRef:
+    labels = row.get("labels") or []
+    kind = NodeKind(labels[0]) if labels else NodeKind.SERVICE
+    return (kind, str(row["key"]))
+
+
+def _to_node(kind: NodeKind, props: dict[str, Any]) -> Node:
+    reserved = {"key", "commit_sha", "indexed_at", "prompt_version"}
+    return Node(
+        kind=kind,
+        key=str(props.get("key", "")),
+        properties={k: v for k, v in props.items() if k not in reserved},
+        commit_sha=str(props.get("commit_sha", "")),
+        indexed_at=_parse_dt(props.get("indexed_at")),
+        prompt_version=props.get("prompt_version"),
+    )
+
+
+def _parse_dt(value: Any) -> datetime:
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return datetime.now(UTC)
+    return datetime.now(UTC)

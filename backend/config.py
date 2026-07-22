@@ -30,6 +30,18 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:5175", "http://localhost:5173"]
     )
 
+    # Backing stores: "inmemory" (default, no infra) or "real" (OpenSearch + Neo4j
+    # + Postgres). The real path uses these connection settings.
+    backing: str = Field(default="inmemory")
+    opensearch_url: str = Field(default="http://localhost:9200")
+    opensearch_index: str = Field(default="vectural-chunks-code")
+    neo4j_uri: str = Field(default="bolt://localhost:7687")
+    neo4j_user: str = Field(default="neo4j")
+    neo4j_password: str = Field(default="vecturalpw")
+    postgres_dsn: str = Field(
+        default="postgresql://vectural:vectural@localhost:5432/vectural"
+    )
+
 
 def load_settings() -> Settings:
     return Settings()

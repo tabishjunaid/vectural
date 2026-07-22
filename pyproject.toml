@@ -32,6 +32,10 @@ opensearch = [
 neo4j = [
     "neo4j>=5.24",
 ]
+# The PostgreSQL system-of-record repositories.
+postgres = [
+    "psycopg[binary]>=3.2",
+]
 # Durable orchestration under a real Temporal server. Optional — the workflow
 # logic is deterministic and tested with no Temporal running.
 temporal = [

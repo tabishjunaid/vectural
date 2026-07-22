@@ -25,6 +25,30 @@ uv run uvicorn backend.asgi:app --port 8000          # backend
 npm --prefix frontend run dev                        # frontend → http://localhost:5175
 ```
 
+### Backing stores: in-memory vs real
+
+The backend defaults to `VECTURAL_BACKING=inmemory` (no external stores). To run
+over the **real datastores** — OpenSearch (chunks/hybrid search), Neo4j (graph +
+structural queries), Postgres (file_ledger/dead_letter) — start them and flip the
+flag:
+
+```bash
+docker compose --profile datastores up -d postgres opensearch neo4j
+VECTURAL_BACKING=real uv run uvicorn backend.asgi:app --port 8000
+```
+
+The adapters live behind the same protocols the in-memory ones satisfy
+(`backend/retrieval/opensearch_backend.py`, `backend/graph/neo4j_store.py`,
+`backend/persistence/postgres.py`), selected in `backend/bootstrap.py`. Their
+integration tests run against the live containers:
+
+```bash
+VECTURAL_RUN_INTEGRATION=1 uv run pytest tests/test_real_adapters.py
+```
+
+(The LLM gateway is still the `FakeGatewayClient` — the real gateway is the only
+adapter that can't be exercised here, per the §2 licence boundary.)
+
 Live surfaces: **Ask** (`/ask` — cited answers, refusal, cache), **Coverage**
 (`/coverage`), **Review** (`/review` — approve a flow narrative and watch that
 service jump to tier 4 on Coverage, the §5.4 single source of truth), and

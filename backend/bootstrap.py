@@ -25,11 +25,15 @@ from backend.embedding import HashingEmbedder
 from backend.flows import FlowNarrativeService, InMemoryFlowStore, identify_flows
 from backend.graph import StructuralQueries, build_graph
 from backend.graph.builder import GraphBuildResult
+from backend.graph.store import GraphStore
 from backend.llm import FakeGatewayClient, LLMRouter
 from backend.observability import MetricsCollector
 from backend.persistence import InMemoryDeadLetter, InMemoryFileLedger
+from backend.persistence.dead_letter import DeadLetterRepo
+from backend.persistence.file_ledger import FileLedgerRepo
 from backend.quota import QuotaAccountant, QuotaConfig, QuotaGovernor, QuotaPool
 from backend.retrieval import InMemorySearchBackend, RetrievalService, TokenOverlapReranker
+from backend.retrieval.base import SearchBackend
 from backend.summarise import (
     FileToSummarise,
     InMemorySummaryStore,
@@ -47,6 +51,16 @@ COMMIT = "BOOTSTRAP"
 
 
 @dataclass
+class Backing:
+    """The store implementations the app runs over — in-memory or real."""
+
+    search: SearchBackend
+    graph: GraphStore
+    file_ledger: FileLedgerRepo
+    dead_letter: DeadLetterRepo
+
+
+@dataclass
 class AppServices:
     app: FastAPI
     answer: AnswerService
@@ -61,15 +75,17 @@ def build_services(
     *,
     summarise_on_boot: bool = True,
     cors_origins: list[str] | None = None,
+    backing: str = "inmemory",
+    settings: object | None = None,
 ) -> AppServices:
     manifest = load_manifest(manifest_path.read_text(encoding="utf-8"))
     graph = build_graph(estate_root, manifest, commit_sha=COMMIT)
-    store = graph.store()
-
     embedder = HashingEmbedder()
-    search = InMemorySearchBackend(embedder=embedder)
-    search.index(graph.chunks)
-    retrieval = RetrievalService(backend=search, embedder=embedder, reranker=TokenOverlapReranker())
+
+    store = _build_backing(backing, graph, embedder, settings)
+    retrieval = RetrievalService(
+        backend=store.search, embedder=embedder, reranker=TokenOverlapReranker()
+    )
 
     metrics = MetricsCollector()
     pool = QuotaPool(QuotaConfig(monthly_budget=100_000_000), period_start=datetime.now(UTC).date())
@@ -77,21 +93,22 @@ def build_services(
     router = LLMRouter(FakeGatewayClient(), sinks=[accountant, metrics])
     governor = QuotaGovernor(pool)
 
-    file_ledger = InMemoryFileLedger()
     summaries = InMemorySummaryStore()
     flows = FlowNarrativeService(store=InMemoryFlowStore(), router=router)
 
     if summarise_on_boot:
-        _run_summarisation(graph, router, governor, file_ledger, summaries)
-    flows.generate(identify_flows(store, StructuralQueries(store)))
+        _run_summarisation(graph, router, governor, store.file_ledger, store.dead_letter, summaries)
+    flows.generate(identify_flows(store.graph, StructuralQueries(store.graph)))
 
-    services = {n.key for n in store.nodes(NodeKind.SERVICE)}
-    planner = RetrievalPlanner(StructuralQueries(store), router, services)
+    services = {n.key for n in store.graph.nodes(NodeKind.SERVICE)}
+    planner = RetrievalPlanner(StructuralQueries(store.graph), router, services)
     answer = AnswerService(
         retrieval=retrieval, planner=planner, router=router,
         cache=SemanticAnswerCache(embedder), flows=flows, metrics=metrics, commit_sha=COMMIT,
     )
-    coverage = CoverageService(manifest=manifest, graph=store, summaries=summaries, flows=flows)
+    coverage = CoverageService(
+        manifest=manifest, graph=store.graph, summaries=summaries, flows=flows
+    )
 
     app = create_app(
         retrieval,
@@ -104,11 +121,55 @@ def build_services(
     return AppServices(app=app, answer=answer, flows=flows, coverage=coverage, metrics=metrics)
 
 
+def _build_backing(
+    backing: str, graph: GraphBuildResult, embedder: HashingEmbedder, settings: object | None
+) -> Backing:
+    if backing != "real":
+        search = InMemorySearchBackend(embedder=embedder)
+        search.index(graph.chunks)
+        return Backing(
+            search=search, graph=graph.store(),
+            file_ledger=InMemoryFileLedger(), dead_letter=InMemoryDeadLetter(),
+        )
+    return _real_backing(graph, embedder, settings)
+
+
+def _real_backing(
+    graph: GraphBuildResult, embedder: HashingEmbedder, settings: object | None
+) -> Backing:
+    """Wire OpenSearch (chunks) + Neo4j (graph) + Postgres (ledgers). Chunks are
+    indexed and the graph loaded so the real stores serve the same estate."""
+    from backend.config import Settings
+    from backend.graph.neo4j_store import Neo4jGraphStore
+    from backend.persistence.postgres import (
+        PgDeadLetter,
+        PgFileLedger,
+        apply_schema,
+        open_connection,
+    )
+    from backend.retrieval.opensearch_backend import OpenSearchBackend
+
+    cfg = settings if isinstance(settings, Settings) else Settings()
+
+    search = OpenSearchBackend.connect(cfg.opensearch_url, cfg.opensearch_index, embedder)
+    search.index(graph.chunks)
+
+    neo = Neo4jGraphStore.connect(cfg.neo4j_uri, cfg.neo4j_user, cfg.neo4j_password)
+    neo.load(graph.nodes, graph.edges)
+
+    conn = open_connection(cfg.postgres_dsn)
+    apply_schema(conn)
+    return Backing(
+        search=search, graph=neo, file_ledger=PgFileLedger(conn), dead_letter=PgDeadLetter(conn)
+    )
+
+
 def _run_summarisation(
     graph: GraphBuildResult,
     router: LLMRouter,
     governor: QuotaGovernor,
-    file_ledger: InMemoryFileLedger,
+    file_ledger: FileLedgerRepo,
+    dead_letter: DeadLetterRepo,
     summaries: InMemorySummaryStore,
 ) -> None:
     """Run tiers 1-3 over the estate (fake gateway) so coverage reflects real
@@ -125,7 +186,7 @@ def _run_summarisation(
     ]
     report = summarise_files(
         files, router=router, governor=governor, file_ledger=file_ledger,
-        dead_letter=InMemoryDeadLetter(), today=now,
+        dead_letter=dead_letter, today=now,
     )
 
     # Tier 2 — group file summaries by folder (module).
@@ -172,6 +233,8 @@ def build_app_from_env() -> FastAPI:
         settings.manifest_path,
         summarise_on_boot=settings.summarise_on_boot,
         cors_origins=settings.cors_origins,
+        backing=settings.backing,
+        settings=settings,
     ).app
 
 
