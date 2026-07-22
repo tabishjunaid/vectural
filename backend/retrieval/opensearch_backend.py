@@ -9,6 +9,7 @@ required). Deletes are by service+path for the §5.9 cascade.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from backend.domain.models import Chunk, ChunkKind, Language, Span
@@ -21,6 +22,8 @@ from backend.retrieval.opensearch_query import knn_query, lexical_query
 
 if TYPE_CHECKING:
     from opensearchpy import OpenSearch
+
+_log = logging.getLogger(__name__)
 
 _SOURCE_FIELDS = [
     "chunk_id", "service", "path", "lines", "language", "kind", "symbol", "content", "commit_sha",
@@ -52,12 +55,30 @@ class OpenSearchBackend:
     def index(self, chunks: list[Chunk]) -> None:
         from opensearchpy.helpers import bulk
 
+        docs = [chunk_to_doc(chunk) for chunk in chunks]
+        # Batch-embed in one call — a real model (BGE-M3 on CPU) is far faster
+        # embedding a batch than one text at a time.
+        needs = [(i, _searchable(c)) for i, (c, d) in enumerate(zip(chunks, docs, strict=True))
+                 if "embedding" not in d]
+        if needs:
+            vectors = self._embedder.embed([text for _, text in needs])
+            for (i, _), vec in zip(needs, vectors, strict=True):
+                docs[i]["embedding"] = vec
+
         actions = []
-        for chunk in chunks:
-            doc = chunk_to_doc(chunk)
-            if "embedding" not in doc:
-                doc["embedding"] = self._embedder.embed_one(_searchable(chunk))
+        skipped_zero = 0
+        for chunk, doc in zip(chunks, docs, strict=True):
+            # A zero-norm vector (e.g. a trivial/empty file) cannot be stored under a
+            # cosinesimil knn_vector — OpenSearch rejects it and would fail the whole
+            # bulk. Such a chunk carries no dense signal, so drop it rather than let one
+            # degenerate file abort the estate. (Real BGE-M3 won't emit exact zeros.)
+            if not any(doc["embedding"]):
+                skipped_zero += 1
+                continue
             actions.append({"_index": self._index, "_id": chunk.chunk_id, "_source": doc})
+        if skipped_zero:
+            _log.warning("skipped %d chunk(s) with zero-norm embeddings (no dense signal)",
+                         skipped_zero)
         if actions:
             bulk(self._client, actions, refresh=True)
 

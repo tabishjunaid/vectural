@@ -66,6 +66,8 @@ def test_schema_covers_system_of_record_tables() -> None:
         "eval_runs",
         "dead_letter",
         "coverage_manifest",
+        "summaries",
+        "flow_narratives",
     ):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
-    assert len(DDL_STATEMENTS) == 7
+    assert len(DDL_STATEMENTS) == 9

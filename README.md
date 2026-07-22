@@ -8,52 +8,147 @@ See [`plan/implementation-plan.md`](plan/implementation-plan.md) and
 [`plan/design-document.md`](plan/design-document.md) for the full design. The
 frontend is tracked separately in [`plan/ui-development-plan.md`](plan/ui-development-plan.md).
 
-## Run the whole thing
+## Starting the application
 
-The React frontend and the FastAPI backend run as an integrated system. The
-backend boots by ingesting `sample-estate/` into in-memory stores and running all
-four summarisation tiers against a **fake gateway** (no real spend, no external
-datastore), so the stack is fully functional standalone.
+The React frontend and the FastAPI backend run as an integrated system. There are
+three ways to start it, from simplest to full. In every mode the LLM gateway is the
+`FakeGatewayClient` — the real gateway is the one adapter that can't be exercised
+here, per the §2 licence boundary — so answer/summary *wording* is placeholder while
+retrieval, citations, grounding/refusal, coverage, and review are all real.
+
+### A. Quick demo — in-memory, no infrastructure
+
+Boots on the bundled `sample-estate/`, indexing + summarising in RAM against the
+fake gateway. Nothing external required.
 
 ```bash
-# Docker (backend + frontend + Postgres + Valkey):
-docker compose up --build            # → frontend http://localhost:5175, API http://localhost:8000
-docker compose --profile datastores up   # also start OpenSearch + Neo4j
+# Whole demo stack in Docker (backend + frontend + Postgres + Valkey):
+docker compose up --build            # → UI http://localhost:5175, API http://localhost:8000
 
-# Or locally, two terminals:
+# …or locally, two terminals:
 uv run uvicorn backend.asgi:app --port 8000          # backend
 npm --prefix frontend run dev                        # frontend → http://localhost:5175
 ```
 
-### Backing stores: in-memory vs real
+This serves the sample estate (services `gateway` / `ledger` / `notifications`) — a
+self-contained walkthrough of every surface.
 
-The backend defaults to `VECTURAL_BACKING=inmemory` (no external stores). To run
-over the **real datastores** — OpenSearch (chunks/hybrid search), Neo4j (graph +
-structural queries), Postgres (file_ledger/dead_letter) — start them and flip the
-flag:
+### B. Full stack in Docker, serving *your* indexed estate
+
+One command brings up every container serving an estate you indexed with the durable
+worker (see [Indexing the knowledge base](#indexing-the-knowledge-base-durable-quota-partitioned)).
+The backend image bundles the real-adapter extras (opensearch/neo4j/postgres) + temporal,
+so the same image serves the API over the real stores **and** hosts the indexing worker.
+
+1. Point the backend at your estate with a **local override** (the estate path is
+   machine-specific — keep this file out of git). Create `docker-compose.override.yml`:
+
+   ```yaml
+   services:
+     backend:
+       environment:
+         VECTURAL_BACKING: real
+         VECTURAL_ESTATE_ROOT: /estate
+         VECTURAL_MANIFEST_PATH: /estate/manifest.yaml
+         VECTURAL_NEO4J_PASSWORD: vecturalpw
+       volumes:
+         - /abs/path/to/your/estate:/estate:ro   # ← edit for your machine
+   ```
+
+2. Bring up everything — core + datastores + Temporal:
+
+   ```bash
+   docker compose --profile datastores --profile indexing up -d --build
+   ```
+
+3. If the stores are empty, **index the estate first** (the backend serves
+   connect-only — it never indexes on boot). See the Indexing section, then open the UI.
+
+| URL | What |
+|-----|------|
+| **http://localhost:5175** | The app — Ask / Coverage / Review |
+| http://localhost:8000/docs | Backend Swagger — try endpoints directly |
+| http://localhost:8080 | Temporal UI — indexing workflow history |
+| http://localhost:7474 | Neo4j browser (`neo4j` / `vecturalpw`) |
+
+Stop it all with `docker compose --profile datastores --profile indexing down`.
+
+### C. Local dev over the real stores (hot reload)
+
+Run the datastores in Docker but the backend + frontend as local processes:
 
 ```bash
-docker compose --profile datastores up -d postgres opensearch neo4j
-VECTURAL_BACKING=real uv run uvicorn backend.asgi:app --port 8000
+docker compose --profile datastores --profile indexing up -d postgres valkey opensearch neo4j temporal
+VECTURAL_BACKING=real \
+  VECTURAL_ESTATE_ROOT=/abs/path/to/estate \
+  VECTURAL_MANIFEST_PATH=/abs/path/to/estate/manifest.yaml \
+  uv run uvicorn backend.asgi:app --reload --port 8000
+npm --prefix frontend run dev                        # → http://localhost:5175
 ```
 
-The adapters live behind the same protocols the in-memory ones satisfy
+`VECTURAL_BACKING=real` uses OpenSearch (chunks/hybrid search), Neo4j (graph +
+structural queries), and Postgres (ledgers, summaries, flows, quota). The adapters
+live behind the same protocols the in-memory ones satisfy
 (`backend/retrieval/opensearch_backend.py`, `backend/graph/neo4j_store.py`,
-`backend/persistence/postgres.py`), selected in `backend/bootstrap.py`. Their
+`backend/persistence/*.py`), selected in `backend/bootstrap.py`, and their
 integration tests run against the live containers:
 
 ```bash
-VECTURAL_RUN_INTEGRATION=1 uv run pytest tests/test_real_adapters.py
+VECTURAL_RUN_INTEGRATION=1 uv run pytest tests/test_real_adapters.py tests/test_quota_ledger.py
 ```
-
-(The LLM gateway is still the `FakeGatewayClient` — the real gateway is the only
-adapter that can't be exercised here, per the §2 licence boundary.)
 
 Live surfaces: **Ask** (`/ask` — cited answers, refusal, cache), **Coverage**
 (`/coverage`), **Review** (`/review` — approve a flow narrative and watch that
 service jump to tier 4 on Coverage, the §5.4 single source of truth), and
 `/metrics`. The frontend API client lives in `frontend/src/lib/api.ts`; the
 runnable backend is `backend/bootstrap.py` + `backend/asgi.py`.
+
+## Using real models
+
+Two components ship as offline stand-ins so the stack runs with no models or spend:
+the **embedder** (`HashingEmbedder`, non-semantic) and the **LLM gateway**
+(`FakeGatewayClient`, canned answers). Each is swapped via config.
+
+### Real embeddings — BGE-M3 (semantic search)
+
+`HashingEmbedder` makes dense/kNN search noise, so conceptual queries miss. Real
+**BGE-M3** (`BAAI/bge-m3`, local, 1024-dim — the same dim as the index, so no schema
+change) makes retrieval semantic. Set `VECTURAL_EMBEDDER=bge-m3` for **both** the
+worker and the API (index-time and query-time must match), then re-index. In Docker
+the model downloads once into the `hf-cache` volume:
+
+```bash
+# .env: VECTURAL_BACKING=real, VECTURAL_EMBEDDER=bge-m3, VECTURAL_ESTATE_HOST_PATH=…
+docker compose --profile datastores --profile indexing up -d --build
+curl -X DELETE localhost:9200/vectural-chunks-code          # drop hash vectors
+docker compose run --rm backend vectural-index --wait       # worker re-embeds with BGE-M3
+```
+
+### Plugging in your LLM gateway (§2)
+
+The **§2 licence boundary** is load-bearing: the platform has exactly one outbound
+LLM client, and *this codebase never ships it* — you supply your own. Implement the
+one-method `GatewayClient` protocol (`backend/llm/base.py`) and point at it:
+
+```python
+# your_pkg/gateway.py
+from backend.llm.base import GatewayClient, GatewayRequest, GatewayResult
+
+class MyGateway:  # satisfies backend.llm.base.GatewayClient
+    def complete(self, request: GatewayRequest) -> GatewayResult:
+        # your HTTP call to your model, using your own endpoint + key (from env):
+        #   text, in_tokens, out_tokens = call_your_gateway(request.model, request.prompt, …)
+        return GatewayResult(text=text, input_tokens=in_tokens, output_tokens=out_tokens)
+```
+
+```bash
+VECTURAL_GATEWAY=real
+VECTURAL_GATEWAY_CLIENT=your_pkg.gateway:MyGateway   # dotted path; dependency-injected
+```
+
+`build_gateway` (`backend/llm/factory.py`) only *loads* your class — it makes no
+network calls and handles no credentials; your client owns the endpoint/key. With it
+set, `/ask` answers come from your model instead of the canned template.
 
 ## Backend status
 
@@ -252,3 +347,43 @@ uv run vectural-estimate ./estate --source-only                 # only recognise
 uv run vectural-estimate ./estate --exclude '.md,.json,.lock'   # drop specific extensions
 uv run vectural-estimate ./estate --exclude-glob '*generated*,*.min.js,dist/*'
 ```
+
+## Indexing the knowledge base (durable, quota-partitioned)
+
+Real indexing is **not** done at app boot — it's a separate, resumable, Temporal-hosted
+job so it can be split into weekly tranches under the gateway quota (§5.7). Each service
+is one governed, atomic unit: embed+index its chunks (OpenSearch), load its graph (Neo4j),
+and summarise it tier 1→2→3 (files → modules → service, gateway). Once every service is
+indexed, a finalize step completes the graph (cross-service edges) and generates the
+cross-service **flow narratives** (tier 4, left pending architect review). It parks when a
+tranche is exhausted and resumes when the next unlocks, with **zero duplicate spend** on
+restart (file-ledger + content-hash idempotency across every tier). Summaries and flows are
+persisted in Postgres (`summaries`, `flow_narratives`), and the shared quota pool in
+`quota_ledger`, so the worker and the serving API draw from one durable source.
+
+```bash
+# 1. Bring up the datastores + Temporal (its own Postgres + UI on :8080):
+docker compose --profile datastores --profile indexing up -d
+
+# 2. Run one or more workers (host the workflow + activities against the real stores):
+VECTURAL_ESTATE_ROOT=./estate VECTURAL_MANIFEST_PATH=./estate/manifest.yaml \
+  uv run vectural-indexer-worker
+
+# 3. Start / resume the run — partitions by the estimator's weekly plan, stable id per estate:
+uv run vectural-index --dry-run     # print the tranche partition only
+uv run vectural-index --wait        # kick off (or resume) and block until done
+```
+
+Re-running `vectural-index` attaches to an in-flight run (resume) or starts a fresh one if the
+last completed — either way already-indexed work is skipped. Watch history / continue-as-new /
+park timers in the Temporal UI at http://localhost:8080.
+
+Then boot the API **connect-only** (it serves what the worker indexed; it never re-indexes):
+
+```bash
+VECTURAL_BACKING=real VECTURAL_ESTATE_ROOT=./estate uv run uvicorn backend.asgi:app --port 8000
+```
+
+> The gateway stays on the fake client (the §2 licence boundary). Wiring the real gateway +
+> BGE-M3 embeddings is the remaining seam; everything else (structural indexing, tiers 1-3,
+> flow narratives) runs through the durable loop and is served from Postgres.

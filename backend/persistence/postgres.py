@@ -9,6 +9,7 @@ what the resume/dedup guarantee (§Phase 5) relies on.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -101,6 +102,27 @@ class PgDeadLetter:
                 DeadLetterEntry(service=r[0], path=r[1], kind=r[2], detail=r[3], at=r[4])
                 for r in cur.fetchall()
             ]
+
+
+class PgCoverageManifest:
+    """``coverage_manifest`` over Postgres — per-service indexing progress (§5.4)."""
+
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+
+    def mark_indexed(self, service: str, *, tier: int, status: str, at: datetime) -> None:
+        next_scheduled = f"tier-{tier + 1}"
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO coverage_manifest "
+                "(service, tier, status, last_indexed, next_scheduled) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (service) DO UPDATE SET "
+                "tier = EXCLUDED.tier, status = EXCLUDED.status, "
+                "last_indexed = EXCLUDED.last_indexed, "
+                "next_scheduled = EXCLUDED.next_scheduled, updated_at = now()",
+                (service, tier, status, at, next_scheduled),
+            )
 
 
 def _to_file_entry(row: tuple[Any, ...]) -> FileLedgerEntry:

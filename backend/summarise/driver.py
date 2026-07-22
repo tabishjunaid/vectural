@@ -28,6 +28,7 @@ from backend.llm.router import LLMRouter
 from backend.persistence.dead_letter import DeadLetterEntry, DeadLetterRepo
 from backend.persistence.file_ledger import FileLedgerEntry, FileLedgerRepo, FileStatus
 from backend.quota.governor import QuotaGovernor
+from backend.summarise.store import SummaryRecord, SummaryStore
 from backend.summarise.tiers import (
     TIER1_PROMPT_VERSION,
     FileSummary,
@@ -86,6 +87,7 @@ def summarise_files(
     today: datetime | None = None,
     persona: Persona | None = None,
     prompt_version: str = TIER1_PROMPT_VERSION,
+    summary_store: SummaryStore | None = None,
 ) -> SummariseReport:
     now = today or datetime.now(UTC)
     report = SummariseReport()
@@ -118,6 +120,7 @@ def summarise_files(
             persona=persona,
             now=now,
             report=report,
+            summary_store=summary_store,
         )
         report.rows.append(FileResultRow(file.service, file.path, outcome, tokens))
         report.tokens_spent += tokens
@@ -136,6 +139,7 @@ def _summarise_one(
     persona: Persona | None,
     now: datetime,
     report: SummariseReport,
+    summary_store: SummaryStore | None,
 ) -> tuple[SummariseOutcome, int]:
     prompt = render_tier1_prompt(path=file.path, content=file.content)
     try:
@@ -157,6 +161,16 @@ def _summarise_one(
         return SummariseOutcome.DEAD_LETTERED, tokens
 
     report.summaries[f"{file.service}:{file.path}"] = summary
+    # Persist the tier-1 summary text durably (before the ledger marks the file
+    # done) so a resume that skips this file still leaves tiers 2-3 their input.
+    if summary_store is not None:
+        summary_store.upsert(
+            SummaryRecord(
+                tier=1, kind="file", key=f"{file.service}:{file.path}",
+                text=summary.purpose, data=summary.model_dump(),
+                content_hash=h, prompt_version=prompt_version, updated_at=now,
+            )
+        )
     file_ledger.upsert(
         FileLedgerEntry(
             service=file.service,

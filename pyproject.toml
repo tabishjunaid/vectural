@@ -41,6 +41,12 @@ postgres = [
 temporal = [
     "temporalio>=1.8",
 ]
+# Real BGE-M3 dense embeddings (local, no gateway) — the semantic retrieval model
+# the HashingEmbedder stands in for. Pulls torch; optional so the offline/demo
+# paths install lean.
+embeddings = [
+    "sentence-transformers>=3.0",
+]
 # OpenTelemetry → SigNoz metrics export. Optional — the collector works standalone.
 otel = [
     "opentelemetry-sdk>=1.27",
@@ -53,6 +59,7 @@ dev = [
     "mypy>=1.13",
     "types-pyyaml>=6.0",
     "httpx>=0.27",  # Starlette TestClient transport
+    "temporalio>=1.8",  # WorkflowEnvironment time-skipping tests (§5.7)
 ]
 
 [project.scripts]
@@ -60,6 +67,10 @@ vectural-init = "backend.init:main"
 vectural-clone = "backend.estate:clone_main"
 vectural-ingest = "backend.cli:main"
 vectural-estimate = "backend.estimator:main"
+# Durable, quota-partitioned indexing (§5.7): a Temporal worker hosts the run,
+# the starter kicks it off / resumes it. Both need the `temporal` extra.
+vectural-index = "backend.orchestration.starter:main"
+vectural-indexer-worker = "backend.orchestration.worker:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -83,7 +94,7 @@ plugins = ["pydantic.mypy"]
 # Optional infra clients (installed only via extras). Their absence must not
 # fail the type check of the in-memory/offline code paths.
 [[tool.mypy.overrides]]
-module = ["neo4j.*", "opensearchpy.*", "temporalio.*", "opentelemetry.*"]
+module = ["neo4j.*", "opensearchpy.*", "temporalio.*", "opentelemetry.*", "sentence_transformers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

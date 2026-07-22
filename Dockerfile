@@ -7,11 +7,17 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies first (better layer caching).
+# Install dependencies first (better layer caching). The real-adapter extras
+# (opensearch/neo4j/postgres) plus `temporal` are installed so the one image can
+# serve the API over the real stores AND host the durable indexing worker (§5.7) —
+# each is just a different Python entrypoint, not a separate build.
 COPY pyproject.toml README.md ./
 COPY backend ./backend
 COPY sample-estate ./sample-estate
-RUN pip install --no-cache-dir .
+# `embeddings` adds real BGE-M3 (sentence-transformers + torch) so the image can
+# embed semantically; the ~2 GB model itself is NOT baked in — it downloads at first
+# use into a mounted HuggingFace cache volume (see docker-compose `hf-cache`).
+RUN pip install --no-cache-dir ".[temporal,opensearch,neo4j,postgres,embeddings]"
 
 ENV VECTURAL_ESTATE_ROOT=sample-estate \
     VECTURAL_MANIFEST_PATH=sample-estate/manifest.yaml \

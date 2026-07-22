@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +37,14 @@ class FileSummary(BaseModel):
 def content_hash(content: str) -> str:
     """Stable content hash used as the summary cache key (with prompt version)."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+
+def module_key(service: str, path: str) -> str:
+    """The tier-2 module a file belongs to: its parent folder, or the service
+    itself for a file at the service root. Paths are service-prefixed, so module
+    keys are naturally namespaced across services."""
+    parent = PurePosixPath(path).parent
+    return str(parent) if str(parent) != "." else service
 
 
 def render_tier1_prompt(*, path: str, content: str) -> str:

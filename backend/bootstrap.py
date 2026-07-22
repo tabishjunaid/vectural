@@ -12,21 +12,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from fastapi import FastAPI
 
 from backend.answer import AnswerService, RetrievalPlanner, SemanticAnswerCache
 from backend.api.app import create_app
 from backend.api.coverage import CoverageService
+from backend.config import Settings
 from backend.domain.manifest import Manifest, load_manifest
 from backend.domain.models import NodeKind
-from backend.embedding import HashingEmbedder
+from backend.embedding.base import Embedder
+from backend.embedding.factory import build_embedder
 from backend.flows import FlowNarrativeService, InMemoryFlowStore, identify_flows
+from backend.flows.review import FlowStore
 from backend.graph import StructuralQueries, build_graph
 from backend.graph.builder import GraphBuildResult
 from backend.graph.store import GraphStore
-from backend.llm import FakeGatewayClient, LLMRouter
+from backend.llm import LLMRouter
+from backend.llm.factory import build_gateway
 from backend.observability import MetricsCollector
 from backend.persistence import InMemoryDeadLetter, InMemoryFileLedger
 from backend.persistence.dead_letter import DeadLetterRepo
@@ -46,6 +50,8 @@ from backend.summarise import (
     summarise_modules,
     summarise_services,
 )
+from backend.summarise.store import SummaryStore
+from backend.summarise.tiers import module_key
 
 COMMIT = "BOOTSTRAP"
 
@@ -58,6 +64,9 @@ class Backing:
     graph: GraphStore
     file_ledger: FileLedgerRepo
     dead_letter: DeadLetterRepo
+    quota_pool: QuotaPool
+    summaries: SummaryStore
+    flow_store: FlowStore
 
 
 @dataclass
@@ -79,8 +88,14 @@ def build_services(
     settings: object | None = None,
 ) -> AppServices:
     manifest = load_manifest(manifest_path.read_text(encoding="utf-8"))
-    graph = build_graph(estate_root, manifest, commit_sha=COMMIT)
-    embedder = HashingEmbedder()
+    embedder = build_embedder(settings if isinstance(settings, Settings) else None)
+
+    # Real indexing is a separate durable job (the Temporal indexing worker), so a
+    # real-backing boot connects to already-populated stores and serves — it does
+    # NOT parse/index/summarise the estate. In-memory backing (the demo path) still
+    # indexes on boot, as does an explicit index_on_boot override.
+    do_boot_index = backing != "real" or _index_on_boot(settings)
+    graph = build_graph(estate_root, manifest, commit_sha=COMMIT) if do_boot_index else None
 
     store = _build_backing(backing, graph, embedder, settings)
     retrieval = RetrievalService(
@@ -88,17 +103,26 @@ def build_services(
     )
 
     metrics = MetricsCollector()
-    pool = QuotaPool(QuotaConfig(monthly_budget=100_000_000), period_start=datetime.now(UTC).date())
+    pool = store.quota_pool  # durable shared pool (persisted for real backing)
     accountant = QuotaAccountant(pool)
-    router = LLMRouter(FakeGatewayClient(), sinks=[accountant, metrics])
+    router = LLMRouter(
+        build_gateway(settings if isinstance(settings, Settings) else None),
+        sinks=[accountant, metrics],
+    )
     governor = QuotaGovernor(pool)
 
-    summaries = InMemorySummaryStore()
-    flows = FlowNarrativeService(store=InMemoryFlowStore(), router=router)
+    # For real backing these are the durable stores the indexing worker wrote to
+    # (Postgres); the API serves tiers 2-3 + flows from them. In-memory backing gets
+    # fresh stores it populates on boot.
+    summaries = store.summaries
+    flows = FlowNarrativeService(store=store.flow_store, router=router)
 
-    if summarise_on_boot:
-        _run_summarisation(graph, router, governor, store.file_ledger, store.dead_letter, summaries)
-    flows.generate(identify_flows(store.graph, StructuralQueries(store.graph)))
+    if graph is not None:  # boot-time indexing (in-memory demo / index_on_boot)
+        if summarise_on_boot:
+            _run_summarisation(
+                graph, router, governor, store.file_ledger, store.dead_letter, summaries
+            )
+        flows.generate(identify_flows(store.graph, StructuralQueries(store.graph)))
 
     services = {n.key for n in store.graph.nodes(NodeKind.SERVICE)}
     planner = RetrievalPlanner(StructuralQueries(store.graph), router, services)
@@ -122,45 +146,70 @@ def build_services(
 
 
 def _build_backing(
-    backing: str, graph: GraphBuildResult, embedder: HashingEmbedder, settings: object | None
+    backing: str,
+    graph: GraphBuildResult | None,
+    embedder: Embedder,
+    settings: object | None,
 ) -> Backing:
     if backing != "real":
+        assert graph is not None  # in-memory backing always indexes on boot
         search = InMemorySearchBackend(embedder=embedder)
         search.index(graph.chunks)
+        pool = QuotaPool(
+            QuotaConfig(monthly_budget=100_000_000), period_start=datetime.now(UTC).date()
+        )
         return Backing(
             search=search, graph=graph.store(),
-            file_ledger=InMemoryFileLedger(), dead_letter=InMemoryDeadLetter(),
+            file_ledger=InMemoryFileLedger(), dead_letter=InMemoryDeadLetter(), quota_pool=pool,
+            summaries=InMemorySummaryStore(), flow_store=InMemoryFlowStore(),
         )
     return _real_backing(graph, embedder, settings)
 
 
 def _real_backing(
-    graph: GraphBuildResult, embedder: HashingEmbedder, settings: object | None
+    graph: GraphBuildResult | None, embedder: Embedder, settings: object | None
 ) -> Backing:
-    """Wire OpenSearch (chunks) + Neo4j (graph) + Postgres (ledgers). Chunks are
-    indexed and the graph loaded so the real stores serve the same estate."""
+    """Connect to OpenSearch + Neo4j + Postgres and load the durable quota pool.
+
+    Connect-only by default: real indexing is the durable worker's job, so boot does
+    NOT write to the stores. Only when ``graph`` is provided (index_on_boot) are chunks
+    indexed and the graph loaded here — an explicit, opt-in escape hatch."""
     from backend.config import Settings
     from backend.graph.neo4j_store import Neo4jGraphStore
+    from backend.persistence.flow_store import PgFlowStore
     from backend.persistence.postgres import (
         PgDeadLetter,
         PgFileLedger,
         apply_schema,
         open_connection,
     )
+    from backend.persistence.quota_ledger import PgQuotaLedger
+    from backend.persistence.summary_store import PgSummaryStore
     from backend.retrieval.opensearch_backend import OpenSearchBackend
 
     cfg = settings if isinstance(settings, Settings) else Settings()
 
     search = OpenSearchBackend.connect(cfg.opensearch_url, cfg.opensearch_index, embedder)
-    search.index(graph.chunks)
-
     neo = Neo4jGraphStore.connect(cfg.neo4j_uri, cfg.neo4j_user, cfg.neo4j_password)
-    neo.load(graph.nodes, graph.edges)
-
     conn = open_connection(cfg.postgres_dsn)
     apply_schema(conn)
+
+    if graph is not None:  # index_on_boot escape hatch — normally the worker does this
+        search.index(graph.chunks)
+        neo.load(graph.nodes, graph.edges)
+
+    pool = PgQuotaLedger(conn, tranche_count=cfg.tranche_count).load_or_create(
+        QuotaConfig(
+            monthly_budget=cfg.monthly_budget,
+            serving_reserve_fraction=cfg.serving_reserve_fraction,
+            tranche_count=cfg.tranche_count,
+        ),
+        datetime.now(UTC).date(),
+    )
     return Backing(
-        search=search, graph=neo, file_ledger=PgFileLedger(conn), dead_letter=PgDeadLetter(conn)
+        search=search, graph=neo, file_ledger=PgFileLedger(conn),
+        dead_letter=PgDeadLetter(conn), quota_pool=pool,
+        summaries=PgSummaryStore(conn), flow_store=PgFlowStore(conn),
     )
 
 
@@ -170,7 +219,7 @@ def _run_summarisation(
     governor: QuotaGovernor,
     file_ledger: FileLedgerRepo,
     dead_letter: DeadLetterRepo,
-    summaries: InMemorySummaryStore,
+    summaries: SummaryStore,
 ) -> None:
     """Run tiers 1-3 over the estate (fake gateway) so coverage reflects real
     tiers. Tier 4 (flows) is generated separately and left pending review."""
@@ -193,11 +242,11 @@ def _run_summarisation(
     modules: dict[str, ModuleInput] = {}
     for key, summary in report.summaries.items():
         service, path = key.split(":", 1)
-        module_key = _module_key(service, path)
+        mod_key = module_key(service, path)
         entry = file_ledger.get(service, path)
         child = ModuleChildSummary(path, entry.content_hash if entry else path, summary)
         modules.setdefault(
-            module_key, ModuleInput(module_key=module_key, service=service, file_summaries=[])
+            mod_key, ModuleInput(module_key=mod_key, service=service, file_summaries=[])
         ).file_summaries.append(child)
     summarise_modules(
         list(modules.values()), router=router, governor=governor, store=summaries, today=now
@@ -219,9 +268,10 @@ def _run_summarisation(
     )
 
 
-def _module_key(service: str, path: str) -> str:
-    parent = PurePosixPath(path).parent
-    return str(parent) if str(parent) != "." else service
+def _index_on_boot(settings: object | None) -> bool:
+    from backend.config import Settings
+
+    return isinstance(settings, Settings) and settings.index_on_boot
 
 
 def build_app_from_env() -> FastAPI:

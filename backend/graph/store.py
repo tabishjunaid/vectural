@@ -72,6 +72,16 @@ class InMemoryGraphStore:
         if src not in in_list:
             in_list.append(src)
 
+    def upsert_nodes(self, nodes: list[Node]) -> None:
+        """Batch upsert — the in-memory twin of Neo4jGraphStore.upsert_nodes so the
+        indexing activity writes to either store through the same GraphWriter seam."""
+        for node in nodes:
+            self.add_node(node)
+
+    def upsert_edges(self, edges: list[Edge]) -> None:
+        for edge in edges:
+            self.add_edge(edge)
+
     # -- GraphStore protocol ------------------------------------------------ #
 
     def has_node(self, kind: NodeKind, key: str) -> bool:

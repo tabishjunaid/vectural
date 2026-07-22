@@ -76,6 +76,13 @@ class SearchBackend(Protocol):
         services: set[str] | None = None,
     ) -> list[SearchHit]: ...
 
+    def indexed_files(self) -> set[tuple[str, str]]:
+        """The ``(service, path)`` pairs already indexed — the idempotency key the
+        indexing/reindex paths use to skip re-embedding unchanged files."""
+        ...
+
+    def delete_by_file(self, service: str, path: str) -> int: ...
+
 
 class Reranker(Protocol):
     """Re-orders candidate hits for a query, returning at most ``top_n`` (§5.3

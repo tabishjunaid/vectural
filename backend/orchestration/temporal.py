@@ -19,22 +19,38 @@ the pure module never imports ``temporalio``.
 
 from __future__ import annotations
 
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from backend.orchestration.temporal_activities import IndexingActivities
 
 
 def build_worker(
     client: Any,
     task_queue: str,
     *,
-    activities: Any,
-) -> Any:  # pragma: no cover - requires a Temporal server
-    """Construct a Temporal worker for the indexing workflow.
+    activities: IndexingActivities,
+    max_workers: int = 4,
+) -> Any:
+    """Construct a Temporal worker for the :class:`IndexingWorkflow`.
 
-    Lazy-imports ``temporalio`` so importing this module never requires it. The
-    workflow/activity registration mirrors :func:`backend.orchestration.workflow.run_indexing`
-    one-to-one; only the durability (history, timers, continue-as-new, activity
-    retries) is delegated to Temporal.
-    """
+    Registers the workflow plus the three sync activities (run in a thread-pool
+    executor since they do blocking I/O). Durability — history, quota-park timers,
+    continue-as-new, activity retries — is delegated to Temporal; the workflow body
+    stays deterministic (:mod:`backend.orchestration.temporal_workflow`)."""
     from temporalio.worker import Worker
 
-    return Worker(client, task_queue=task_queue, activities=[activities.summarise_service])
+    from backend.orchestration.temporal_workflow import IndexingWorkflow
+
+    return Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[IndexingWorkflow],
+        activities=[
+            activities.request_budget,
+            activities.index_service,
+            activities.finalize,
+        ],
+        activity_executor=ThreadPoolExecutor(max_workers=max_workers),
+    )

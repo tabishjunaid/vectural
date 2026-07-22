@@ -42,6 +42,36 @@ class Settings(BaseSettings):
         default="postgresql://vectural:vectural@localhost:5432/vectural"
     )
 
+    # Whether to (re)index into the real stores on app boot. Default False: real
+    # indexing is a separate durable job (the Temporal indexing worker), so booting
+    # the API connects to already-populated stores and serves — it never re-indexes.
+    index_on_boot: bool = Field(default=False)
+
+    # Quota policy — the shared pool the indexing worker and the serving API both
+    # draw from (§5.7). Persisted in the quota_ledger row; these are the defaults
+    # used when creating a fresh period.
+    monthly_budget: int = Field(default=50_000_000)
+    serving_reserve_fraction: float = Field(default=0.30)
+    tranche_count: int = Field(default=4)
+
+    # Temporal — the durable indexing orchestrator (§5.7). Used by the worker
+    # (backend.orchestration.worker) and starter (backend.orchestration.starter).
+    temporal_target: str = Field(default="localhost:7233")
+    temporal_namespace: str = Field(default="default")
+    temporal_task_queue: str = Field(default="vectural-indexing")
+
+    # Dense-retrieval embedder: "hashing" (default, offline stand-in) or "bge-m3"
+    # (real BGE-M3, local, 1024-dim, via the `embeddings` extra). Index-time and
+    # query-time MUST use the same one, so set this for both worker and API.
+    embedder: str = Field(default="hashing")
+
+    # LLM gateway (§2 licence boundary): "fake" (default, no spend) or "real". The
+    # real client is NOT shipped — supply your own GatewayClient implementation and
+    # point at it: gateway_client="your_pkg.module:YourGatewayClient". Opus never
+    # authors or operates this egress (design §2).
+    gateway: str = Field(default="fake")
+    gateway_client: str = Field(default="")
+
 
 def load_settings() -> Settings:
     return Settings()

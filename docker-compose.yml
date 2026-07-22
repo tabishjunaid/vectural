@@ -1,31 +1,64 @@
 # Vectural local stack (design-document §6 as a runnable compose approximation).
 #
-#   docker compose up --build                 # core: backend + frontend + postgres + valkey
-#   docker compose --profile datastores up    # also start OpenSearch + Neo4j
+#   docker compose up --build                                    # demo: sample-estate, in-memory
+#   docker compose --profile datastores --profile indexing up -d --build   # full real stack
 #
-# The backend runs the in-memory bootstrap (fake gateway, no real spend), so the
-# core stack is fully functional without the heavy datastores. Postgres, Valkey,
-# OpenSearch, and Neo4j are provisioned for the config-gated real adapters to
-# switch onto once wired.
+# Defaults give the self-contained demo (in-memory, fake gateway, hashing embedder).
+# Override via a .env file (compose auto-loads it) to serve your real indexed estate:
+#   VECTURAL_ESTATE_HOST_PATH=/abs/path/to/estate
+#   VECTURAL_BACKING=real
+#   VECTURAL_EMBEDDER=bge-m3          # real BGE-M3 (model cached in the hf-cache volume)
+#   VECTURAL_GATEWAY=real             # + VECTURAL_GATEWAY_CLIENT=pkg.mod:Class (your own client, §2)
+# See .env.example.
+
+# Shared config for the backend API and the indexing worker — same image, one config.
+x-vectural-env: &vectural-env
+  VECTURAL_BACKING: ${VECTURAL_BACKING:-inmemory}
+  VECTURAL_EMBEDDER: ${VECTURAL_EMBEDDER:-hashing}
+  VECTURAL_GATEWAY: ${VECTURAL_GATEWAY:-fake}
+  VECTURAL_GATEWAY_CLIENT: ${VECTURAL_GATEWAY_CLIENT:-}
+  VECTURAL_ESTATE_ROOT: /estate
+  VECTURAL_MANIFEST_PATH: /estate/manifest.yaml
+  VECTURAL_POSTGRES_DSN: postgresql://vectural:vectural@postgres:5432/vectural
+  VECTURAL_VALKEY_URL: redis://valkey:6379/0
+  VECTURAL_OPENSEARCH_URL: http://opensearch:9200
+  VECTURAL_NEO4J_URI: bolt://neo4j:7687
+  VECTURAL_NEO4J_PASSWORD: vecturalpw
+  VECTURAL_TEMPORAL_TARGET: temporal:7233
+
+x-vectural-volumes: &vectural-volumes
+  # The estate to serve/index (defaults to the bundled sample-estate); the model cache
+  # so BGE-M3 downloads once and persists across restarts.
+  - ${VECTURAL_ESTATE_HOST_PATH:-./sample-estate}:/estate:ro
+  - hf-cache:/root/.cache/huggingface
 
 services:
   backend:
     build:
       context: .
       dockerfile: Dockerfile
-    environment:
-      VECTURAL_ESTATE_ROOT: sample-estate
-      VECTURAL_MANIFEST_PATH: sample-estate/manifest.yaml
-      # Datastore DSNs (consumed by the real adapters when enabled):
-      VECTURAL_POSTGRES_DSN: postgresql://vectural:vectural@postgres:5432/vectural
-      VECTURAL_VALKEY_URL: redis://valkey:6379/0
-      VECTURAL_OPENSEARCH_URL: http://opensearch:9200
-      VECTURAL_NEO4J_URI: bolt://neo4j:7687
+    environment: *vectural-env
+    volumes: *vectural-volumes
     ports:
       - "8000:8000"
     depends_on:
       - postgres
       - valkey
+
+  # Durable indexing worker (§5.7) — same image, hosts the Temporal workflow +
+  # activities. Started with `--profile indexing`. Kick a run with:
+  #   docker compose run --rm backend vectural-index --wait
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["vectural-indexer-worker"]
+    profiles: ["indexing"]
+    environment: *vectural-env
+    volumes: *vectural-volumes
+    depends_on:
+      - postgres
+      - temporal
 
   frontend:
     build:
@@ -80,7 +113,47 @@ services:
     volumes:
       - neo4jdata:/data
 
+  # Durable indexing orchestrator (§5.7) — started only with `--profile indexing`.
+  # Its own Postgres so the estate's system-of-record DB stays independent of
+  # Temporal's internal state.
+  temporal-postgres:
+    image: postgres:16-alpine
+    profiles: ["indexing"]
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporalpgdata:/var/lib/postgresql/data
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    profiles: ["indexing"]
+    depends_on:
+      - temporal-postgres
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgres
+    ports:
+      - "7233:7233"  # gRPC — vectural-indexer-worker / vectural-index connect here
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    profiles: ["indexing"]
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:8080
+    ports:
+      - "8080:8080"  # workflow history / continue-as-new / timers
+
 volumes:
   pgdata:
   osdata:
   neo4jdata:
+  temporalpgdata:
+  hf-cache:      # HuggingFace model cache (BGE-M3) — downloaded once, reused

@@ -184,3 +184,57 @@ def test_opensearch_index_and_hybrid_search() -> None:
     # Cascade delete removes the file's chunks.
     assert backend.delete_by_file("payments", "payments/refund.py") >= 1
     assert ("payments", "payments/refund.py") not in backend.indexed_files()
+
+
+@pytest.mark.skipif(not _reachable("localhost", 5432), reason="postgres not reachable")
+def test_pg_summary_store_roundtrip() -> None:
+    from datetime import datetime as _dt
+
+    from backend.persistence.postgres import apply_schema, open_connection
+    from backend.persistence.summary_store import PgSummaryStore
+    from backend.summarise.store import SummaryRecord
+
+    conn = open_connection(PG_DSN)
+    apply_schema(conn)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM summaries WHERE key LIKE 'it-svc%'")
+
+    store = PgSummaryStore(conn)
+    rec = SummaryRecord(
+        tier=2, kind="module", key="it-svc/mod", text="handles refunds",
+        data={"responsibility": "handles refunds", "key_files": ["a.py"]},
+        content_hash="h1", prompt_version="module-v1", updated_at=_dt(2026, 7, 1, tzinfo=UTC),
+    )
+    store.upsert(rec)
+    got = store.get(2, "it-svc/mod")
+    assert got is not None
+    assert got.text == "handles refunds"
+    assert got.data["key_files"] == ["a.py"]  # JSONB round-trips
+    assert any(r.key == "it-svc/mod" for r in store.all(2))
+
+
+@pytest.mark.skipif(not _reachable("localhost", 5432), reason="postgres not reachable")
+def test_pg_flow_store_roundtrip() -> None:
+    from datetime import datetime as _dt
+
+    from backend.flows.models import FlowNarrative, ReviewStatus
+    from backend.persistence.flow_store import PgFlowStore
+    from backend.persistence.postgres import apply_schema, open_connection
+
+    conn = open_connection(PG_DSN)
+    apply_schema(conn)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM flow_narratives WHERE id LIKE 'it-flow%'")
+
+    store = PgFlowStore(conn)
+    narrative = FlowNarrative(
+        id="it-flow-1", title="Refund", services=["payments", "ledger"], trigger="call graph",
+        signature="sig", text="payments calls ledger", prompt_version="flow-v1",
+        content_hash="h1", status=ReviewStatus.PENDING, updated_at=_dt(2026, 7, 1, tzinfo=UTC),
+    )
+    store.upsert(narrative)
+    got = store.get("it-flow-1")
+    assert got is not None
+    assert got.services == ["payments", "ledger"]  # JSONB model round-trips
+    assert got.status is ReviewStatus.PENDING
+    assert any(n.id == "it-flow-1" for n in store.all())

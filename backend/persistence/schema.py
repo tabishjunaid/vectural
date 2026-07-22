@@ -86,6 +86,31 @@ DDL_STATEMENTS: tuple[str, ...] = (
         updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+    # Tier 1/2/3 summaries (file / module / service), content-hash keyed so a
+    # higher tier regenerates only when a child changes (§5.2, §5.9). Durable so
+    # tiers 2-3 survive a resume that skips already-summarised tier-1 files.
+    """
+    CREATE TABLE IF NOT EXISTS summaries (
+        tier            INT  NOT NULL,
+        key             TEXT NOT NULL,
+        kind            TEXT NOT NULL,
+        text            TEXT NOT NULL,
+        data            JSONB NOT NULL,
+        content_hash    TEXT NOT NULL,
+        prompt_version  TEXT NOT NULL,
+        updated_at      TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (tier, key)
+    )
+    """,
+    # Tier-4 cross-service flow narratives + review lifecycle (§4.4, §Phase 7).
+    """
+    CREATE TABLE IF NOT EXISTS flow_narratives (
+        id              TEXT PRIMARY KEY,
+        status          TEXT NOT NULL,
+        data            JSONB NOT NULL,
+        updated_at      TIMESTAMPTZ NOT NULL
+    )
+    """,
 )
 
 
