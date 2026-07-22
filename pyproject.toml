@@ -56,7 +56,10 @@ dev = [
 ]
 
 [project.scripts]
+vectural-init = "backend.init:main"
+vectural-clone = "backend.estate:clone_main"
 vectural-ingest = "backend.cli:main"
+vectural-estimate = "backend.estimator:main"
 
 [build-system]
 requires = ["hatchling"]

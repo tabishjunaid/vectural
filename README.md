@@ -206,6 +206,49 @@ uv run python -m backend.demo <estate-root> -m manifest.yaml --orchestrate  # §
 ```
 
 See [`manifest.example.yaml`](manifest.example.yaml) for the manifest format.
-The retrieval API is served by `create_app(retrieval_service)` from
-`backend.api`; the production wiring (OpenSearch backend + BGE-M3 embedder) is
-the next adapter to add.
+The retrieval API is served by `create_app(retrieval_service)` from `backend.api`.
+
+## Estate tooling
+
+### Guided setup (recommended)
+
+`vectural-init` runs the three initial-setup stages in one flow — **clone** the
+estate, **derive the manifest**, then **estimate the token cost** — before any
+gateway spend. Interactive by default; every prompt has a flag. Idempotent, so
+re-running just refreshes.
+
+```bash
+uv run vectural-init                                  # fully interactive
+uv run vectural-init --path ./estate --parent https://github.com/acme --source-only
+uv run vectural-init --path ./estate --skip-clone     # estate already on disk
+```
+
+Stage flags: `--shallow`, `--include-archived`, `--dry-run` (stage 1);
+`--source-only`, `--exclude`, `--exclude-glob`, `--monthly-budget` (stage 3).
+The estimate report goes to stdout, progress/guidance to stderr, so
+`vectural-init … --skip-clone > estimate.txt` captures just the numbers.
+
+### Individual stages
+
+```bash
+# Stage 1 — clone every repo under a Git org/group into one root (prompts for
+# path + URL; GitHub via gh/API, GitLab via API incl. subgroups; idempotent):
+uv run vectural-clone                                 # interactive prompts
+uv run vectural-clone --path ./estate --parent https://github.com/acme
+
+# Stage 3 — estimate the indexing token cost BEFORE spending anything (§Phase 0, §5.2.1):
+# embedding workload + gateway summarisation tokens (instruction overhead broken
+# out) + a weekly bin-packed plan for the quota governor.
+# Prompts for the estate path if omitted; if there's no manifest.yaml yet (e.g. a
+# freshly-cloned estate) it derives one service per top-level directory.
+uv run vectural-estimate                              # interactive
+uv run vectural-estimate ./estate                     # no manifest needed
+uv run vectural-estimate ./estate --write-manifest    # also save the derived manifest
+                                                       # (writes manifest.draft.yaml if one exists)
+uv run vectural-estimate ./estate -m ./estate/manifest.yaml --json
+
+# Scope to source only (docs/config/data inflate the token count):
+uv run vectural-estimate ./estate --source-only                 # only recognised languages
+uv run vectural-estimate ./estate --exclude '.md,.json,.lock'   # drop specific extensions
+uv run vectural-estimate ./estate --exclude-glob '*generated*,*.min.js,dist/*'
+```

@@ -56,3 +56,4 @@ data/
 # Kubernetes / Helm local overrides
 *.local.yaml
 secrets.yaml
+uv.lock
