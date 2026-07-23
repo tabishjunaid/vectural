@@ -17,7 +17,7 @@ COPY sample-estate ./sample-estate
 # `embeddings` adds real BGE-M3 (sentence-transformers + torch) so the image can
 # embed semantically; the ~2 GB model itself is NOT baked in — it downloads at first
 # use into a mounted HuggingFace cache volume (see docker-compose `hf-cache`).
-RUN pip install --no-cache-dir ".[temporal,opensearch,neo4j,postgres,embeddings]"
+RUN pip install --no-cache-dir ".[temporal,opensearch,neo4j,postgres,embeddings,gateway]"
 
 ENV VECTURAL_ESTATE_ROOT=sample-estate \
     VECTURAL_MANIFEST_PATH=sample-estate/manifest.yaml \

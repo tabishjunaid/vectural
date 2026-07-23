@@ -124,31 +124,62 @@ curl -X DELETE localhost:9200/vectural-chunks-code          # drop hash vectors
 docker compose run --rm backend vectural-index --wait       # worker re-embeds with BGE-M3
 ```
 
-### Plugging in your LLM gateway (§2)
+### Real LLM — Claude or GPT (§5.6)
 
-The **§2 licence boundary** is load-bearing: the platform has exactly one outbound
-LLM client, and *this codebase never ships it* — you supply your own. Implement the
-one-method `GatewayClient` protocol (`backend/llm/base.py`) and point at it:
-
-```python
-# your_pkg/gateway.py
-from backend.llm.base import GatewayClient, GatewayRequest, GatewayResult
-
-class MyGateway:  # satisfies backend.llm.base.GatewayClient
-    def complete(self, request: GatewayRequest) -> GatewayResult:
-        # your HTTP call to your model, using your own endpoint + key (from env):
-        #   text, in_tokens, out_tokens = call_your_gateway(request.model, request.prompt, …)
-        return GatewayResult(text=text, input_tokens=in_tokens, output_tokens=out_tokens)
-```
+The platform has one model egress, and it's provider-agnostic: `GatewayClient` is a
+single method (`complete(GatewayRequest) -> GatewayResult`). Pick a provider with
+`VECTURAL_GATEWAY`; each SDK reads its key **from the environment** — the code never
+stores one.
 
 ```bash
-VECTURAL_GATEWAY=real
-VECTURAL_GATEWAY_CLIENT=your_pkg.gateway:MyGateway   # dotted path; dependency-injected
+# .env — OpenAI
+VECTURAL_GATEWAY=openai
+OPENAI_API_KEY=sk-proj-…
+```
+```bash
+# .env — Claude (key, or an `ant auth login` profile mounted into the container)
+VECTURAL_GATEWAY=anthropic
+ANTHROPIC_API_KEY=sk-ant-api03-…
 ```
 
-`build_gateway` (`backend/llm/factory.py`) only *loads* your class — it makes no
-network calls and handles no credentials; your client owns the endpoint/key. With it
-set, `/ask` answers come from your model instead of the canned template.
+**Company AI Gateway (§2).** A corporate gateway issues its own **key + URL** and
+usually fronts Claude as a black box. Point the matching client at it — config only,
+no code change:
+
+```bash
+# .env — gateway speaking the Anthropic Messages API
+VECTURAL_GATEWAY=anthropic
+ANTHROPIC_API_KEY=<key issued by the gateway>
+VECTURAL_ANTHROPIC_BASE_URL=https://ai-gateway.your-company/...
+VECTURAL_ANTHROPIC_HAIKU_MODEL=<model name the gateway publishes>
+VECTURAL_ANTHROPIC_SONNET_MODEL=<model name the gateway publishes>
+```
+
+If the gateway is instead **OpenAI-compatible**, use `VECTURAL_GATEWAY=openai` with
+`VECTURAL_OPENAI_BASE_URL` + the OpenAI model vars. Ask your platform team which wire
+format it exposes — that's the only thing that decides which of the two you pick.
+
+Model tiers map per provider — OpenAI `gpt-4o-mini` / `gpt-4o`, Anthropic
+`claude-haiku-4-5` / `claude-sonnet-5` — each overridable. Behind a gateway you
+**must** set the model vars to the names it publishes; the public defaults won't
+exist there. Any other wire format: implement the one method and point
+`VECTURAL_GATEWAY_CLIENT` at it.
+
+Restart, and **every** gateway touchpoint switches at once: `/ask` planning →
+synthesis → groundedness, plus the summarisation tiers during indexing.
+
+- **Real answers are immediate** once the key is set. **Real summaries** need a
+  re-index (clear `file_ledger` + `summaries`, re-run `vectural-index`) so tiers 1-3
+  regenerate through the model — this spends real tokens.
+- A missing key **fails fast at boot** (the SDK raises at construction), so you'll
+  know immediately rather than at the first query.
+- **Bring your own gateway** instead: `VECTURAL_GATEWAY_CLIENT=pkg.module:Class`
+  points `build_gateway` at any `GatewayClient` you implement (`backend/llm/base.py`,
+  one method); the loader only imports it and handles no credentials.
+
+> §2 note: the design reserves the model egress as a single, licensed boundary.
+> Enabling `real` uses **your own** Anthropic key (set by you, never handled by the
+> code), and is opt-in — the default stays `fake` (no spend).
 
 ## Backend status
 

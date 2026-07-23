@@ -65,12 +65,26 @@ class Settings(BaseSettings):
     # query-time MUST use the same one, so set this for both worker and API.
     embedder: str = Field(default="hashing")
 
-    # LLM gateway (§2 licence boundary): "fake" (default, no spend) or "real". The
-    # real client is NOT shipped — supply your own GatewayClient implementation and
-    # point at it: gateway_client="your_pkg.module:YourGatewayClient". Opus never
-    # authors or operates this egress (design §2).
+    # LLM gateway (§5.6) — the single model egress. One of:
+    #   "fake"      (default, canned, no spend)
+    #   "anthropic" (Claude; alias: "real")   — key from ANTHROPIC_API_KEY / ant profile
+    #   "openai"    (GPT)                      — key from OPENAI_API_KEY
+    # Or set gateway_client="your_pkg.module:YourGatewayClient" to inject your own.
+    # Keys are always read from the environment by each SDK, never stored here.
     gateway: str = Field(default="fake")
     gateway_client: str = Field(default="")
+    # Concrete model ids per logical tier (blank → the client's defaults).
+    anthropic_haiku_model: str = Field(default="")   # default claude-haiku-4-5
+    anthropic_sonnet_model: str = Field(default="")  # default claude-sonnet-5
+    # Point the Anthropic-compatible client at a company AI Gateway that fronts
+    # Claude (its own key + URL, §2). Blank → api.anthropic.com.
+    anthropic_base_url: str = Field(default="")
+    openai_small_model: str = Field(default="")      # default gpt-4o-mini
+    openai_large_model: str = Field(default="")      # default gpt-4o
+    # Point the OpenAI-compatible client at a different endpoint — e.g. a company AI
+    # gateway that issues its own key + URL. Blank → api.openai.com. Swapping between
+    # the two is just this URL + the key; no code change.
+    openai_base_url: str = Field(default="")
 
 
 def load_settings() -> Settings:

@@ -47,6 +47,12 @@ temporal = [
 embeddings = [
     "sentence-transformers>=3.0",
 ]
+# Real LLM gateway (§5.6) — Claude and/or GPT via the official SDKs. Optional so the
+# fake-gateway offline path installs with no LLM dependency.
+gateway = [
+    "anthropic>=0.40",
+    "openai>=1.40",
+]
 # OpenTelemetry → SigNoz metrics export. Optional — the collector works standalone.
 otel = [
     "opentelemetry-sdk>=1.27",
@@ -60,6 +66,8 @@ dev = [
     "types-pyyaml>=6.0",
     "httpx>=0.27",  # Starlette TestClient transport
     "temporalio>=1.8",  # WorkflowEnvironment time-skipping tests (§5.7)
+    "anthropic>=0.40",  # real gateway client unit tests (§5.6)
+    "openai>=1.40",
 ]
 
 [project.scripts]
@@ -94,7 +102,7 @@ plugins = ["pydantic.mypy"]
 # Optional infra clients (installed only via extras). Their absence must not
 # fail the type check of the in-memory/offline code paths.
 [[tool.mypy.overrides]]
-module = ["neo4j.*", "opensearchpy.*", "temporalio.*", "opentelemetry.*", "sentence_transformers.*"]
+module = ["neo4j.*", "opensearchpy.*", "temporalio.*", "opentelemetry.*", "sentence_transformers.*", "anthropic.*", "openai.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
