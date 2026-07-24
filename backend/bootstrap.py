@@ -36,8 +36,9 @@ from backend.persistence import InMemoryDeadLetter, InMemoryFileLedger
 from backend.persistence.dead_letter import DeadLetterRepo
 from backend.persistence.file_ledger import FileLedgerRepo
 from backend.quota import QuotaAccountant, QuotaConfig, QuotaGovernor, QuotaPool
-from backend.retrieval import InMemorySearchBackend, RetrievalService, TokenOverlapReranker
+from backend.retrieval import InMemorySearchBackend, RetrievalService
 from backend.retrieval.base import SearchBackend
+from backend.retrieval.rerank_factory import build_reranker
 from backend.summarise import (
     FileToSummarise,
     InMemorySummaryStore,
@@ -99,7 +100,9 @@ def build_services(
 
     store = _build_backing(backing, graph, embedder, settings)
     retrieval = RetrievalService(
-        backend=store.search, embedder=embedder, reranker=TokenOverlapReranker()
+        backend=store.search,
+        embedder=embedder,
+        reranker=build_reranker(settings if isinstance(settings, Settings) else None),
     )
 
     metrics = MetricsCollector()

@@ -118,7 +118,9 @@ def _mixed_estate(tmp_path: Path) -> tuple[Path, Manifest]:
     (tmp_path / "svc" / "app.py").write_text("def handler():\n    return compute()\n")
     (tmp_path / "svc" / "README.md").write_text("# docs\n" + "words " * 200)
     (tmp_path / "svc" / "data.json").write_text('{"k": ' + "1," * 500 + "0}")
-    (tmp_path / "svc" / "yarn.lock").write_text("lockfile " * 300)
+    # Deliberately NOT a lock file: those are dropped by the walker itself now, so
+    # they can never reach the estimator's own exclusion options.
+    (tmp_path / "svc" / "data.csv").write_text("a,b\n" + "1,2\n" * 300)
     manifest, _ = resolve_manifest(tmp_path, None)
     return tmp_path, manifest
 
@@ -127,7 +129,7 @@ def test_source_only_counts_only_recognised_languages(tmp_path: Path) -> None:
     root, manifest = _mixed_estate(tmp_path)
     full = estimate_estate(root, manifest)
     src = estimate_estate(root, manifest, EstimatorConfig(source_only=True))
-    assert full.total_files == 4  # py + md + json + lock
+    assert full.total_files == 4  # py + md + json + csv
     assert src.total_files == 1  # only app.py
     assert src.excluded_files == 3
     assert src.total_gateway_tokens < full.total_gateway_tokens  # docs/data no longer counted
@@ -135,7 +137,7 @@ def test_source_only_counts_only_recognised_languages(tmp_path: Path) -> None:
 
 def test_exclude_suffixes(tmp_path: Path) -> None:
     root, manifest = _mixed_estate(tmp_path)
-    cfg = EstimatorConfig(exclude_suffixes=frozenset({".md", ".json", ".lock"}))
+    cfg = EstimatorConfig(exclude_suffixes=frozenset({".md", ".json", ".csv"}))
     est = estimate_estate(root, manifest, cfg)
     assert est.total_files == 1
     assert est.excluded_files == 3
@@ -144,10 +146,10 @@ def test_exclude_suffixes(tmp_path: Path) -> None:
 def test_exclude_glob(tmp_path: Path) -> None:
     (tmp_path / "svc").mkdir()
     (tmp_path / "svc" / "app.py").write_text("x = 1\n")
-    (tmp_path / "svc" / "app.min.js").write_text("var a=1;\n")
+    (tmp_path / "svc" / "app_pb2.py").write_text("# generated\n")
     manifest, _ = resolve_manifest(tmp_path, None)
     est = estimate_estate(root=tmp_path, manifest=manifest, config=EstimatorConfig(
-        exclude_globs=("*.min.js",)
+        exclude_globs=("*_pb2.py",)
     ))
     assert est.excluded_files == 1
     assert est.total_files == 1

@@ -122,6 +122,67 @@ export function ask(question: string, persona: PersonaId): Promise<LiveAnswer> {
   return post<BackendAnswer>('/ask', { question, persona }).then(adaptAnswer);
 }
 
+/* One progress event on the answer path (backend AnswerStage). `status` is
+   'start' before a step and a terminal marker after ('ok'/'hit'/'miss'/'empty'/
+   'fail'); `detail` is a human sentence to show the user. */
+export interface AnswerStageEvent {
+  stage: string;
+  status: string;
+  detail: string;
+}
+
+/* Streaming ask: POST /ask/stream returns Server-Sent Events. `onStage` fires as
+   each pipeline step runs (so the UI can show what's happening live), and the
+   promise resolves with the final answer. EventSource can't POST, so we read the
+   response body and parse SSE frames ourselves. */
+export async function askStream(
+  question: string,
+  persona: PersonaId,
+  onStage: (event: AnswerStageEvent) => void,
+): Promise<LiveAnswer> {
+  const res = await fetch(`${BASE}/ask/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, persona }),
+  });
+  if (!res.ok || !res.body) throw new Error(`POST /ask/stream → ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let answer: LiveAnswer | null = null;
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE frames are separated by a blank line.
+    let sep: number;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      const { event, data } = parseFrame(frame);
+      if (!data) continue;
+      if (event === 'stage') onStage(JSON.parse(data) as AnswerStageEvent);
+      else if (event === 'done') answer = adaptAnswer(JSON.parse(data) as BackendAnswer);
+    }
+  }
+
+  if (!answer) throw new Error('stream ended without an answer');
+  return answer;
+}
+
+function parseFrame(frame: string): { event: string; data: string } {
+  let event = 'message';
+  const dataLines: string[] = [];
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+  }
+  return { event, data: dataLines.join('\n') };
+}
+
 export function getCoverage(): Promise<CoverageRow[]> {
   return get<CoverageRow[]>('/coverage');
 }

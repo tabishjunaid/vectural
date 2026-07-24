@@ -9,10 +9,12 @@ estimate separates content tokens from the fixed ``prompt_overhead_tokens`` leve
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Frozen after Phase 4 calibration in reality; bumping it invalidates every tier-1
 # summary (a budgeted event, §8 risk 1). Kept explicit so a change is deliberate.
@@ -25,6 +27,34 @@ SERVICE_PROMPT_VERSION = "service-v1"  # tier 3 (Sonnet)
 PROMPT_OVERHEAD_TOKENS = 120
 
 
+def _flatten_to_strings(value: Any) -> Any:
+    """Coerce a model's list field into ``list[str]``.
+
+    The tier-1 prompt asks for JSON with these keys but does not — and, being a
+    billed per-call overhead (§5.2.1), should not — spell out that the arrays hold
+    plain strings. Models therefore answer with defensible richer shapes: a bare
+    string for a single item, or objects like ``{"method": "GET", "endpoint": "/x"}``.
+    Rejecting those wastes a call that was already paid for and leaves the file with
+    no summary, which then starves tiers 2-3 of their input.
+
+    So normalise instead of rejecting. Objects are flattened losslessly to
+    ``k=v, k=v`` rather than guessing which key is the "real" one.
+    """
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        return value  # let pydantic report anything genuinely unusable
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict):
+            out.append(", ".join(f"{k}={v}" for k, v in item.items()))
+        else:
+            out.append(str(item))
+    return out
+
+
 class FileSummary(BaseModel):
     """Tier-1 (file) summary output (§5.2)."""
 
@@ -32,6 +62,11 @@ class FileSummary(BaseModel):
     key_operations: list[str] = Field(default_factory=list)
     business_concepts: list[str] = Field(default_factory=list)
     external_calls: list[str] = Field(default_factory=list)
+
+    @field_validator("key_operations", "business_concepts", "external_calls", mode="before")
+    @classmethod
+    def _coerce_list_of_str(cls, value: Any) -> Any:
+        return _flatten_to_strings(value)
 
 
 def content_hash(content: str) -> str:
@@ -66,6 +101,26 @@ def estimate_tier1_cost(content: str) -> int:
     content_tokens = max(1, len(content.split()))
     # Input overhead + an allowance for the structured output.
     return content_tokens + PROMPT_OVERHEAD_TOKENS + 40
+
+
+# Chars-per-token used by the *context-window guard* below. Deliberately lower
+# (i.e. more pessimistic) than the estimator's 3.5 planning ratio: this number
+# decides whether a call is safe to make at all, so it must OVER-estimate.
+# Under-counting costs a 400 that aborts a whole service; over-counting only
+# dead-letters one borderline file.
+GUARD_CHARS_PER_TOKEN = 3.0
+
+
+def estimate_prompt_tokens(prompt: str) -> int:
+    """Upper-bound token count for a rendered prompt, for context-window guarding.
+
+    Character-based on purpose. A word-count proxy (as in :func:`estimate_tier1_cost`)
+    collapses on dense machine-generated text — a 730 KB minified JSON file splits into
+    ~45k "words" but really costs ~219k tokens, so a word-based guard would wave through
+    the very files that blow the context window."""
+    if not prompt:
+        return 0
+    return math.ceil(len(prompt) / GUARD_CHARS_PER_TOKEN)
 
 
 # --------------------------------------------------------------------------- #

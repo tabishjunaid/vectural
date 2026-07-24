@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from backend.answer.models import Answer
-from backend.answer.service import AnswerService
+from backend.answer.service import AnswerService, AnswerStage
 from backend.api.answer_schemas import AskRequest
 from backend.api.coverage import CoverageRow, CoverageService
 from backend.api.review_schemas import ReviewAction
@@ -126,8 +126,15 @@ def create_app(
 
     @app.post("/ask/stream", tags=["answer"])
     def ask_stream(req: AskRequest, service: AnswerDep) -> StreamingResponse:
-        answer = service.answer(req.question, req.persona)
-        return StreamingResponse(_sse(answer), media_type="text/event-stream")
+        # Real progress: the pipeline is streamed as it runs, so a `stage` event
+        # reaches the client the instant each step starts — not after the whole
+        # answer is already computed. `X-Accel-Buffering: no` stops nginx from
+        # buffering the stream and defeating that.
+        return StreamingResponse(
+            _sse(service, req.question, req.persona),
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
 
     # -- architect flow-narrative review (§Phase 7) ------------------------- #
 
@@ -179,13 +186,18 @@ def _flow_action(action: Callable[[], FlowNarrative]) -> FlowNarrative:
         raise HTTPException(status_code=404, detail=f"flow {exc} not found") from exc
 
 
-def _sse(answer: Answer) -> Iterator[str]:
-    """Emit the answer as SSE events: mode first, then the text token-by-token,
-    then a final event carrying citations / refusal metadata."""
-    yield _event("mode", {"mode": answer.mode.value, "persona": answer.persona.value})
-    for token in answer.text.split(" "):
-        yield _event("token", {"t": token + " "})
-    yield _event("done", answer.model_dump(mode="json"))
+def _sse(service: AnswerService, question: str, persona: Persona) -> Iterator[str]:
+    """Stream the answer path as SSE: a ``stage`` event as each pipeline step runs,
+    then a final ``done`` event with the answer (citations / refusal metadata).
+
+    The generator is the live pipeline, so events are flushed as the work happens —
+    the client sees "Searching…", "Drafting…", "Verifying…" while the slow gateway
+    calls are still in flight, instead of nothing until the whole answer is ready."""
+    for item in service.stream(question, persona):
+        if isinstance(item, AnswerStage):
+            yield _event("stage", item.model_dump())
+        else:  # the terminal Answer — exactly one, last
+            yield _event("done", item.model_dump(mode="json"))
 
 
 def _event(name: str, data: dict[str, object]) -> str:

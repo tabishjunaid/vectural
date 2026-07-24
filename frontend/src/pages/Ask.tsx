@@ -6,13 +6,28 @@ import { SourcesRail } from '../components/SourcesRail';
 import { PersonaSelect } from '../components/PersonaSelect';
 import { useCitationDrawer } from '../components/citation';
 import { usePersona } from '../lib/persona';
-import { ask, type LiveAnswer } from '../lib/api';
+import { askStream, type AnswerStageEvent, type LiveAnswer } from '../lib/api';
 
 const EXAMPLES = [
   'How does the gateway charge via payments and ledger?',
   'What does payments call?',
   'How are payment events consumed?',
 ];
+
+/* The pipeline stages, in order, with the label shown before each runs. Keys
+   match the backend AnswerStage.stage values (backend/answer/service.py). */
+const STAGE_ORDER = ['cache', 'plan', 'retrieve', 'synthesize', 'cite', 'ground'] as const;
+const STAGE_LABEL: Record<string, string> = {
+  cache: 'Checking cache',
+  plan: 'Planning scope',
+  retrieve: 'Searching evidence',
+  synthesize: 'Drafting answer',
+  cite: 'Resolving citations',
+  ground: 'Verifying claims',
+};
+// Terminal statuses (anything but 'start') mean the stage finished.
+const isDone = (status: string) => status !== 'start';
+const isFail = (status: string) => status === 'fail' || status === 'empty';
 
 /* Ask — live wired to POST /ask. Renders the backend's terminal states
    (synthesized / instant / refusal). Refusal is a first-class state, not an
@@ -22,6 +37,7 @@ export function Ask() {
   const { setCitations } = useCitationDrawer();
   const [question, setQuestion] = useState(EXAMPLES[0]);
   const [answer, setAnswer] = useState<LiveAnswer | null>(null);
+  const [stages, setStages] = useState<AnswerStageEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -32,8 +48,19 @@ export function Ask() {
       if (!trimmed) return;
       setLoading(true);
       setError(null);
+      setAnswer(null);
+      setStages([]);
       try {
-        const result = await ask(trimmed, personaId);
+        const result = await askStream(trimmed, personaId, (event) => {
+          // Keep the latest event per stage, in pipeline order, so the checklist
+          // shows one row per step (start → done) rather than a growing log.
+          setStages((prev) => {
+            const next = prev.filter((s) => s.stage !== event.stage);
+            next.push(event);
+            next.sort((a, b) => STAGE_ORDER.indexOf(a.stage as never) - STAGE_ORDER.indexOf(b.stage as never));
+            return next;
+          });
+        });
         setAnswer(result);
         setCitations(result.citations);
       } catch (e) {
@@ -96,7 +123,25 @@ export function Ask() {
 
             {loading && (
               <div className="answer-card">
-                <span className="answer-mode-tag streaming">● thinking…</span>
+                <span className="answer-mode-tag streaming">● Working…</span>
+                <ol className="stage-list">
+                  {stages.map((s) => (
+                    <li
+                      key={s.stage}
+                      className={`stage-row ${isDone(s.status) ? 'done' : 'active'} ${
+                        isFail(s.status) ? 'failed' : ''
+                      }`}
+                    >
+                      <span className="stage-icon" aria-hidden>
+                        {isFail(s.status) ? '✕' : isDone(s.status) ? '✓' : '●'}
+                      </span>
+                      <span className="stage-text">
+                        <span className="stage-label">{STAGE_LABEL[s.stage] ?? s.stage}</span>
+                        {s.detail && <span className="stage-detail">{s.detail}</span>}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
               </div>
             )}
 

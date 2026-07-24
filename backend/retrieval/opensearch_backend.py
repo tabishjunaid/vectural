@@ -102,12 +102,21 @@ class OpenSearchBackend:
 
         by_id = {hit_id: (source, score) for hit_id, source, score in lexical + dense}
         lex_scores = {hit_id: score for hit_id, _s, score in lexical}
+        # Report the dense half too. Without this, every hit came back with the
+        # dense_score default of 0.0 even when kNN had ranked it first, which reads
+        # as "semantic search is dead" while it is in fact working.
+        dense_scores = {hit_id: score for hit_id, _s, score in dense}
         fused = _rrf_fuse(
             lexical_ranking=[hid for hid, _s, _sc in lexical],
             dense_ranking=[hid for hid, _s, _sc in dense],
         )
         hits = [
-            _to_hit(by_id[cid][0], score=rrf, lexical_score=lex_scores.get(cid, 0.0))
+            _to_hit(
+                by_id[cid][0],
+                score=rrf,
+                lexical_score=lex_scores.get(cid, 0.0),
+                dense_score=dense_scores.get(cid, 0.0),
+            )
             for cid, rrf in fused
             if cid in by_id
         ]
@@ -158,7 +167,9 @@ def _searchable(chunk: Chunk) -> str:
     return "\n".join(parts)
 
 
-def _to_hit(source: dict[str, Any], *, score: float, lexical_score: float) -> SearchHit:
+def _to_hit(
+    source: dict[str, Any], *, score: float, lexical_score: float, dense_score: float = 0.0
+) -> SearchHit:
     start, _, end = str(source.get("lines", "1-1")).partition("-")
     return SearchHit(
         chunk_id=source["chunk_id"],
@@ -172,4 +183,5 @@ def _to_hit(source: dict[str, Any], *, score: float, lexical_score: float) -> Se
         commit_sha=source.get("commit_sha", ""),
         score=score,
         lexical_score=lexical_score,
+        dense_score=dense_score,
     )

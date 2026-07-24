@@ -19,7 +19,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from backend.failures import TransientGatewayError
+from backend.failures import (
+    CONTENT_STATUS_CODES,
+    ContentFailure,
+    TransientGatewayError,
+    content_failure_kind,
+)
 from backend.llm.base import GatewayRequest, GatewayResult, ModelName
 
 if TYPE_CHECKING:
@@ -85,6 +90,15 @@ class AnthropicGatewayClient:
         except anthropic.APIStatusError as exc:  # 4xx/5xx with a response
             if exc.status_code == 429 or exc.status_code >= 500:
                 raise TransientGatewayError(str(exc), status_code=exc.status_code) from exc
+            if exc.status_code in CONTENT_STATUS_CODES:
+                # Per-item content failure (oversized prompt, unprocessable body) —
+                # dead-lettered so one file cannot abort the batch (§5.8). Matches
+                # the OpenAI client so both providers behave identically.
+                raise ContentFailure(
+                    str(exc),
+                    kind=content_failure_kind(str(exc)),
+                    detail=f"status={exc.status_code}",
+                ) from exc
             raise
         except anthropic.APIConnectionError as exc:  # network failure before a response
             raise TransientGatewayError(str(exc)) from exc

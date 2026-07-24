@@ -36,6 +36,23 @@ class TransientGatewayError(Exception):
         self.status_code = status_code
 
 
+# Permanent HTTP statuses that describe *this request's content* rather than the
+# deployment: prompt too long, payload too large, unprocessable body. A gateway
+# client maps these to :class:`ContentFailure` so the item is dead-lettered and the
+# batch continues. Auth/permission failures (401/403) are deliberately excluded —
+# those are misconfiguration and must fail the run loudly rather than be swallowed
+# once per file.
+CONTENT_STATUS_CODES = frozenset({400, 413, 422})
+
+
+def content_failure_kind(message: str) -> str:
+    """Classify a permanent 4xx for its dead-letter row, so a weekly review can tell
+    "this file is too big" apart from "this request was malformed"."""
+    lowered = message.lower()
+    oversize = ("context_length_exceeded", "too long", "too large", "maximum context")
+    return "oversized_input" if any(m in lowered for m in oversize) else "bad_request"
+
+
 class ContentFailure(Exception):
     """A per-item failure: parse error, malformed model output, oversized file.
     Dead-lettered for weekly review; the batch continues."""

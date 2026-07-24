@@ -2,6 +2,7 @@ import { Children, isValidElement, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CitationChip } from './citation';
+import { MermaidDiagram } from './MermaidDiagram';
 
 /* Production markdown renderer (react-markdown + remark-gfm, per the plan).
    Two Vectural-specific behaviours layered on top:
@@ -70,6 +71,9 @@ const components: Components = {
     const code = isValidElement(codeEl)
       ? extractText((codeEl.props as { children?: ReactNode }).children)
       : extractText(children);
+    // A ```mermaid block is a diagram, not code — render it visually (§the product
+    // is about graphs). Everything else stays in the dark code shell.
+    if (lang === 'mermaid') return <MermaidDiagram code={code} />;
     return <CodeBlock lang={lang} code={code} />;
   },
 };

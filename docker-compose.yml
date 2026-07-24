@@ -58,6 +58,12 @@ services:
     depends_on:
       - postgres
       - valkey
+    # OpenSearch and Neo4j live in the `datastores` profile, so they cannot be
+    # depends_on here — Compose rejects a dependency that an inactive profile
+    # disables, which would break the no-profile demo. With VECTURAL_BACKING=real
+    # the boot connects to them eagerly and dies if they are still starting, so
+    # retry until they answer instead.
+    restart: unless-stopped
 
   # Durable indexing worker (§5.7) — same image, hosts the Temporal workflow +
   # activities. Started with `--profile indexing`. Kick a run with:
@@ -66,6 +72,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Same image as the backend — one build, one artifact, no drift between the
+    # serving and indexing halves.
+    image: vectural-backend:latest
     command: ["vectural-indexer-worker"]
     profiles: ["indexing"]
     environment: *vectural-env
@@ -74,6 +83,8 @@ services:
     depends_on:
       - postgres
       - temporal
+    # Same reason as the backend: the datastores it indexes into are profile-gated.
+    restart: unless-stopped
 
   frontend:
     build:

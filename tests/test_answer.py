@@ -131,3 +131,46 @@ def test_plan_falls_back_on_invalid_cypher(answer_env: AnswerEnv) -> None:
     plan = planner.plan("how does gateway call payments")
     assert plan.used_fallback
     assert plan.cypher_attempts == 2  # one retry, then templated fallback
+
+
+def test_stream_narrates_stages_then_the_answer(answer_env: AnswerEnv) -> None:
+    """The staged pipeline emits progress events for the UI, and its terminal
+    Answer is byte-identical to what the plain answer() returns — one code path,
+    so a narrated run and a silent one cannot diverge."""
+    from backend.answer.models import Answer
+    from backend.answer.service import AnswerStage
+
+    svc = _service(answer_env, FakeGatewayClient())
+    items = list(svc.stream(QUESTION, Persona.ENGINEER))
+
+    stages = [i for i in items if isinstance(i, AnswerStage)]
+    answers = [i for i in items if isinstance(i, Answer)]
+
+    # Exactly one Answer, and it is the last item.
+    assert len(answers) == 1
+    assert isinstance(items[-1], Answer)
+    # The user-visible stages a synthesized answer walks through, in order.
+    keys = [s.stage for s in stages]
+    for expected in ("plan", "retrieve", "synthesize", "cite", "ground"):
+        assert expected in keys
+    assert keys.index("retrieve") < keys.index("synthesize") < keys.index("ground")
+    # Every stage carries a human sentence for the UI to show.
+    assert all(s.detail for s in stages)
+    # Same terminal answer as the non-streamed path.
+    assert answers[0].mode is svc.answer(QUESTION, Persona.ENGINEER).mode
+
+
+def test_stream_cache_hit_short_circuits(answer_env: AnswerEnv) -> None:
+    from backend.answer.models import Answer, AnswerMode
+    from backend.answer.service import AnswerStage
+
+    cache = SemanticAnswerCache(answer_env.embedder)
+    svc = _service(answer_env, FakeGatewayClient(), cache=cache)
+    svc.answer(QUESTION, Persona.ENGINEER)  # populate cache
+
+    items = list(svc.stream(QUESTION, Persona.ENGINEER))
+    stages = [i.stage for i in items if isinstance(i, AnswerStage)]
+    assert "cache" in stages
+    assert "synthesize" not in stages  # no gateway call on a hit
+    assert items[-1].mode is AnswerMode.INSTANT  # type: ignore[union-attr]
+    assert isinstance(items[-1], Answer)

@@ -18,7 +18,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from backend.failures import TransientGatewayError
+from backend.failures import (
+    CONTENT_STATUS_CODES,
+    ContentFailure,
+    TransientGatewayError,
+    content_failure_kind,
+)
 from backend.llm.base import GatewayRequest, GatewayResult, ModelName
 
 if TYPE_CHECKING:
@@ -88,6 +93,12 @@ class OpenAIGatewayClient:
             status = getattr(exc, "status_code", 0) or 0
             if status == 429 or status >= 500:
                 raise TransientGatewayError(str(exc), status_code=status) from exc
+            if status in CONTENT_STATUS_CODES:
+                # Per-item content failure (oversized prompt, unprocessable body) —
+                # dead-lettered so one bad file cannot abort a whole service batch (§5.8).
+                raise ContentFailure(
+                    str(exc), kind=content_failure_kind(str(exc)), detail=f"status={status}"
+                ) from exc
             raise
         except openai.APIConnectionError as exc:  # network failure before a response
             raise TransientGatewayError(str(exc)) from exc

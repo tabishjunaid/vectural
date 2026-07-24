@@ -33,9 +33,16 @@ from backend.summarise.tiers import (
     TIER1_PROMPT_VERSION,
     FileSummary,
     content_hash,
+    estimate_prompt_tokens,
     estimate_tier1_cost,
     render_tier1_prompt,
 )
+
+# Largest tier-1 prompt we will send, in tokens. Sits under the smallest context
+# window we target (128k) with headroom for the system preamble and the completion.
+# A file over this is dead-lettered as an oversized content failure (§5.8) — never
+# sent, because the provider's 400 would abort the whole service batch.
+DEFAULT_MAX_INPUT_TOKENS = 96_000
 
 
 class SummariseOutcome(StrEnum):
@@ -88,6 +95,7 @@ def summarise_files(
     persona: Persona | None = None,
     prompt_version: str = TIER1_PROMPT_VERSION,
     summary_store: SummaryStore | None = None,
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
 ) -> SummariseReport:
     now = today or datetime.now(UTC)
     report = SummariseReport()
@@ -121,6 +129,7 @@ def summarise_files(
             now=now,
             report=report,
             summary_store=summary_store,
+            max_input_tokens=max_input_tokens,
         )
         report.rows.append(FileResultRow(file.service, file.path, outcome, tokens))
         report.tokens_spent += tokens
@@ -140,9 +149,20 @@ def _summarise_one(
     now: datetime,
     report: SummariseReport,
     summary_store: SummaryStore | None,
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
 ) -> tuple[SummariseOutcome, int]:
     prompt = render_tier1_prompt(path=file.path, content=file.content)
     try:
+        # Guard the context window before spending anything. A prompt over the limit
+        # would come back as a permanent 400, and one such file must not take down
+        # the whole service batch — dead-letter it and carry on (§5.8).
+        estimated = estimate_prompt_tokens(prompt)
+        if 0 < max_input_tokens < estimated:
+            raise ContentFailure(
+                f"tier-1 prompt is ~{estimated} tokens, over the {max_input_tokens} limit",
+                kind="oversized_file",
+                detail=f"path={file.path} chars={len(file.content)} est_tokens={estimated}",
+            )
         response = router.route(TaskType.FILE_SUMMARY, prompt_version, {"prompt": prompt}, persona)
     except ContentFailure as exc:
         _dead_letter(file, exc.kind, exc.detail, dead_letter, file_ledger, h, prompt_version, now)

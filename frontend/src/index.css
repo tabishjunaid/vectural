@@ -144,6 +144,32 @@ html, body, #root {
   padding: 3px 9px; margin-bottom: 10px;
 }
 .answer-mode-tag.streaming { color: var(--accent); background: var(--accent-weak); border-color: #cdd7fa; }
+
+/* Live answer-path progress (Ask). One row per pipeline stage: pending stages
+   pulse, finished stages check off, a failed gate marks red. */
+.stage-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.stage-row { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; }
+.stage-icon {
+  flex: 0 0 auto; width: 18px; height: 18px; display: inline-flex; align-items: center;
+  justify-content: center; font-size: 11px; font-weight: 800; border-radius: 999px;
+}
+.stage-row.active .stage-icon { color: var(--accent); background: var(--accent-weak); animation: stage-pulse 1s ease-in-out infinite; }
+.stage-row.done .stage-icon { color: var(--green); background: #ecf7f0; }
+.stage-row.failed .stage-icon { color: #b42318; background: #fdeceb; }
+.stage-text { display: flex; flex-direction: column; gap: 1px; line-height: 1.35; }
+.stage-label { font-weight: 650; color: var(--text); }
+.stage-row.active .stage-label { color: var(--accent); }
+.stage-row.failed .stage-label { color: #b42318; }
+.stage-detail { color: var(--text-faint); font-size: 12px; }
+@keyframes stage-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* Rendered Mermaid diagram inside an answer. Centered, on a soft panel, and
+   allowed to scroll horizontally so a wide graph never blows out the layout. */
+.mermaid-diagram {
+  margin: 14px 0; padding: 16px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow-x: auto; text-align: center;
+}
+.mermaid-diagram svg { max-width: 100%; height: auto; }
 .stream-cursor {
   display: inline-block; width: 2px; height: 14px; background: var(--accent); margin-left: 2px;
   vertical-align: middle; animation: blink 1s steps(1) infinite;

@@ -10,7 +10,7 @@ import pytest
 
 from backend.config import Settings
 from backend.domain.models import TaskType
-from backend.failures import TransientGatewayError
+from backend.failures import ContentFailure, TransientGatewayError
 from backend.llm.base import GatewayRequest, ModelName
 from backend.llm.openai_client import OpenAIGatewayClient
 
@@ -112,6 +112,60 @@ def test_transient_error_mapping() -> None:
     gw = OpenAIGatewayClient(client=fake)
 
     with pytest.raises(TransientGatewayError):
+        gw.complete(_req())
+
+
+def _status_error(status: int, message: str, body: Any = None) -> Exception:
+    import httpx
+    import openai
+
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    resp = httpx.Response(status_code=status, request=req)
+    return openai.APIStatusError(message, response=resp, body=body)
+
+
+def test_context_length_400_is_a_content_failure_not_a_crash() -> None:
+    """The regression: a permanent 400 used to escape as a raw BadRequestError, abort
+    the whole service batch, and be retried forever by Temporal. It must dead-letter."""
+    fake = _FakeClient(
+        error=_status_error(
+            400,
+            "This model's maximum context length is 128000 tokens. "
+            "However, your messages resulted in 214259 tokens.",
+            body={"code": "context_length_exceeded"},
+        )
+    )
+    gw = OpenAIGatewayClient(client=fake)
+
+    with pytest.raises(ContentFailure) as caught:
+        gw.complete(_req())
+    assert caught.value.kind == "oversized_input"
+
+
+def test_other_permanent_4xx_is_a_content_failure() -> None:
+    fake = _FakeClient(error=_status_error(422, "unprocessable entity"))
+    gw = OpenAIGatewayClient(client=fake)
+
+    with pytest.raises(ContentFailure) as caught:
+        gw.complete(_req())
+    assert caught.value.kind == "bad_request"
+
+
+def test_rate_limit_is_still_transient() -> None:
+    fake = _FakeClient(error=_status_error(429, "rate limited"))
+    gw = OpenAIGatewayClient(client=fake)
+    with pytest.raises(TransientGatewayError):
+        gw.complete(_req())
+
+
+def test_auth_failure_still_propagates_loudly() -> None:
+    """401/403 are misconfiguration, not content. Swallowing them per-file would turn
+    a bad key into thousands of silent dead-letters instead of one loud failure."""
+    import openai
+
+    fake = _FakeClient(error=_status_error(401, "invalid api key"))
+    gw = OpenAIGatewayClient(client=fake)
+    with pytest.raises(openai.APIStatusError):
         gw.complete(_req())
 
 

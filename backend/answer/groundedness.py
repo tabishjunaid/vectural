@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from backend.answer.citations import strip_fenced_blocks
 from backend.domain.models import Persona, TaskType
 from backend.llm.router import LLMRouter
 from backend.retrieval.base import SearchHit
@@ -45,9 +46,15 @@ def check_groundedness(
 
 def _render_prompt(answer_text: str, chunks: list[SearchHit]) -> str:
     evidence = "\n".join(f"- [{c.chunk_id}] {c.path}:{c.span}\n{c.content}" for c in chunks)
+    # Judge the prose claims, not the illustrations. A fenced code/Mermaid block
+    # restates cited prose visually; its markup is not an independent claim, and
+    # feeding raw diagram syntax to the judge invites spurious "unsupported" flags.
+    # The prompt requires every claim to appear (and be cited) in prose, so nothing
+    # load-bearing hides in a diagram.
+    prose = strip_fenced_blocks(answer_text)
     return (
         "Check every claim in the ANSWER against the EVIDENCE. Return JSON "
         '{"grounded": bool, "unsupported_claims": [string]}. A claim is grounded '
         "only if the evidence directly supports it.\n\n"
-        f"# ANSWER\n{answer_text}\n\n# EVIDENCE\n{evidence}"
+        f"# ANSWER\n{prose}\n\n# EVIDENCE\n{evidence}"
     )

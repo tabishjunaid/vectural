@@ -20,7 +20,12 @@ from backend.persistence.dead_letter import DeadLetterRepo
 from backend.persistence.file_ledger import FileLedgerRepo
 from backend.quota.governor import QuotaGovernor
 from backend.retrieval.base import SearchBackend
-from backend.summarise.driver import FileToSummarise, SummariseReport, summarise_files
+from backend.summarise.driver import (
+    DEFAULT_MAX_INPUT_TOKENS,
+    FileToSummarise,
+    SummariseReport,
+    summarise_files,
+)
 from backend.summarise.higher import (
     ModuleInput,
     ServiceInput,
@@ -103,6 +108,7 @@ class IndexServiceActivities:
     summaries: SummaryStore | None = None
     coverage: CoverageWriter | None = None
     prompt_version: str = TIER1_PROMPT_VERSION
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS
 
     def summarise_service(
         self, service: str, files: list[FileToSummarise], today: datetime
@@ -127,6 +133,7 @@ class IndexServiceActivities:
             today=today,
             prompt_version=self.prompt_version,
             summary_store=self.summaries,
+            max_input_tokens=self.max_input_tokens,
         )
 
         tier = 1

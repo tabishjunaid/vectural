@@ -13,6 +13,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from backend.summarise.driver import DEFAULT_MAX_INPUT_TOKENS
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="VECTURAL_", env_file=".env", extra="ignore")
@@ -54,6 +56,12 @@ class Settings(BaseSettings):
     serving_reserve_fraction: float = Field(default=0.30)
     tranche_count: int = Field(default=4)
 
+    # Largest tier-1 prompt to send, in tokens. A file estimated above this is
+    # dead-lettered as an oversized content failure (§5.8) instead of being sent —
+    # the provider would reject it with a permanent 400, which previously aborted the
+    # whole service batch. Lower this for a gateway with a smaller context window.
+    tier1_max_input_tokens: int = Field(default=DEFAULT_MAX_INPUT_TOKENS)
+
     # Temporal — the durable indexing orchestrator (§5.7). Used by the worker
     # (backend.orchestration.worker) and starter (backend.orchestration.starter).
     temporal_target: str = Field(default="localhost:7233")
@@ -64,6 +72,11 @@ class Settings(BaseSettings):
     # (real BGE-M3, local, 1024-dim, via the `embeddings` extra). Index-time and
     # query-time MUST use the same one, so set this for both worker and API.
     embedder: str = Field(default="hashing")
+
+    # Rerank stage (§5.3 step 6). "bge" is the real cross-encoder; "token-overlap"
+    # is the offline stand-in; "noop" keeps the fused order. Default stays the
+    # stand-in so offline tests and the no-model demo behave as before.
+    reranker: str = Field(default="token-overlap")
 
     # LLM gateway (§5.6) — the single model egress. One of:
     #   "fake"      (default, canned, no spend)

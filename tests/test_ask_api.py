@@ -44,9 +44,13 @@ def test_ask_stream_emits_sse_events(answer_env: AnswerEnv) -> None:
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
     body = resp.text
-    assert "event: mode" in body
-    assert "event: token" in body
+    # Live progress: a `stage` event per pipeline step, then one terminal `done`.
+    assert "event: stage" in body
     assert "event: done" in body
+    assert '"stage": "retrieve"' in body  # a named stage the UI renders
+    assert body.count("event: done") == 1
+    # `done` is last — the answer arrives after the narration.
+    assert body.rindex("event: done") > body.rindex("event: stage")
 
 
 def test_ask_disabled_without_answer_service(retrieval_service) -> None:

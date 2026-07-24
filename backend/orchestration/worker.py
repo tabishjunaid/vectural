@@ -76,6 +76,7 @@ def _build_indexer(
         work=work, search=search, graph=neo, router=router,
         governor=QuotaGovernor(pool), file_ledger=PgFileLedger(conn),
         dead_letter=PgDeadLetter(conn), summaries=summaries, coverage=coverage,
+        max_input_tokens=cfg.tier1_max_input_tokens,
     )
     return indexer, pool, quota_ledger, router, summaries
 
