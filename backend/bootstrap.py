@@ -128,10 +128,14 @@ def build_services(
         flows.generate(identify_flows(store.graph, StructuralQueries(store.graph)))
 
     services = {n.key for n in store.graph.nodes(NodeKind.SERVICE)}
-    planner = RetrievalPlanner(StructuralQueries(store.graph), router, services)
+    structural = StructuralQueries(store.graph)
+    planner = RetrievalPlanner(structural, router, services)
     answer = AnswerService(
         retrieval=retrieval, planner=planner, router=router,
         cache=SemanticAnswerCache(embedder), flows=flows, metrics=metrics, commit_sha=COMMIT,
+        # The summary pyramid and call graph were previously built, persisted, and
+        # then read only by the coverage screen — the answer path never saw them.
+        summaries=summaries, structural=structural,
     )
     coverage = CoverageService(
         manifest=manifest, graph=store.graph, summaries=summaries, flows=flows

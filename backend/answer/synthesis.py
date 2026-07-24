@@ -14,7 +14,7 @@ from backend.llm.base import RoutedResponse
 from backend.llm.router import LLMRouter
 from backend.retrieval.base import SearchHit
 
-SYNTHESIS_PROMPT_VERSION = "synth-v2"
+SYNTHESIS_PROMPT_VERSION = "synth-v3"
 
 # How much of each retrieved chunk to put in front of the model.
 #
@@ -30,13 +30,28 @@ SYNTHESIS_PROMPT_VERSION = "synth-v2"
 EVIDENCE_CHARS_PER_CHUNK = 1500
 
 
-def render_synthesis_prompt(question: str, persona: Persona, chunks: list[SearchHit]) -> str:
+def render_synthesis_prompt(
+    question: str,
+    persona: Persona,
+    chunks: list[SearchHit],
+    *,
+    context_block: str = "",
+    evidence_chars: int = EVIDENCE_CHARS_PER_CHUNK,
+) -> str:
     evidence_lines = [
         f"- [{c.chunk_id}] {c.path}:{c.span} ({c.symbol or c.kind.value})\n"
-        f"{_evidence_body(c.content)}"
+        f"{_evidence_body(c.content, limit=evidence_chars)}"
         for c in chunks
     ]
     evidence = "\n".join(evidence_lines) if evidence_lines else "(no evidence retrieved)"
+    # Context (service/module summaries + call-graph edges) orients the model
+    # before it reads fragments. It is NOT citable — it has no chunk ids — so the
+    # instruction below is load-bearing, not decoration.
+    context = (
+        f"\n# ARCHITECTURAL CONTEXT (background only — NOT citable)\n{context_block}\n"
+        if context_block
+        else ""
+    )
     return (
         f"{persona_instruction(persona)}\n\n"
         "Answer the question using ONLY the evidence below, in this structure:\n"
@@ -49,13 +64,23 @@ def render_synthesis_prompt(question: str, persona: Persona, chunks: list[Search
         "and put NO citation markers inside the diagram. Omit the diagram entirely "
         "for a purely factual or definitional question — never invent one to fill "
         "space.\n"
-        "3. **Details** — the explanation, in prose.\n\n"
+        "3. **Details** — a thorough explanation. Cover, where the evidence "
+        "supports it: the mechanism (what actually happens, in order); the "
+        "components involved and their responsibilities; where the behaviour is "
+        "configured or wired; and any caveats, limits or failure modes. Prefer "
+        "specifics — names of functions, files, settings — over general statements. "
+        "Do not pad: if the evidence only supports a short answer, give a short "
+        "answer.\n\n"
         "Citations: every claim-bearing sentence in the Summary and Details must "
         "cite the evidence it rests on with the evidence id in square brackets, e.g. "
         "[id]. Do not cite ids that are not listed. The diagram is illustration, so "
         "it carries no citations and must not be the only place a relationship "
         "appears — state it in prose too. If the evidence does not support an "
-        "answer, say so plainly.\n\n"
+        "answer, say so plainly.\n"
+        "The ARCHITECTURAL CONTEXT section, when present, is background to help you "
+        "frame the answer — it has no ids and must never be cited. Every claim still "
+        "rests on an EVIDENCE id.\n"
+        f"{context}\n"
         f"# QUESTION\n{question}\n\n# EVIDENCE (cite by id)\n{evidence}"
     )
 
@@ -66,10 +91,18 @@ def synthesise(
     question: str,
     persona: Persona,
     chunks: list[SearchHit],
+    context_block: str = "",
+    evidence_chars: int = EVIDENCE_CHARS_PER_CHUNK,
+    max_tokens: int | None = None,
     prompt_version: str = SYNTHESIS_PROMPT_VERSION,
 ) -> RoutedResponse:
-    prompt = render_synthesis_prompt(question, persona, chunks)
-    return router.route(TaskType.SYNTHESIS, prompt_version, {"prompt": prompt}, persona)
+    prompt = render_synthesis_prompt(
+        question, persona, chunks, context_block=context_block, evidence_chars=evidence_chars
+    )
+    payload: dict[str, object] = {"prompt": prompt}
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    return router.route(TaskType.SYNTHESIS, prompt_version, payload, persona)
 
 
 def _evidence_body(content: str, *, limit: int = EVIDENCE_CHARS_PER_CHUNK) -> str:

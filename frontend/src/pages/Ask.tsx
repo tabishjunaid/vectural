@@ -6,6 +6,8 @@ import { SourcesRail } from '../components/SourcesRail';
 import { PersonaSelect } from '../components/PersonaSelect';
 import { useCitationDrawer } from '../components/citation';
 import { usePersona } from '../lib/persona';
+import { useDepth } from '../lib/depth';
+import { DepthSelect } from '../components/DepthSelect';
 import { askStream, type AnswerStageEvent, type LiveAnswer } from '../lib/api';
 
 const EXAMPLES = [
@@ -16,11 +18,12 @@ const EXAMPLES = [
 
 /* The pipeline stages, in order, with the label shown before each runs. Keys
    match the backend AnswerStage.stage values (backend/answer/service.py). */
-const STAGE_ORDER = ['cache', 'plan', 'retrieve', 'synthesize', 'cite', 'ground'] as const;
+const STAGE_ORDER = ['cache', 'plan', 'retrieve', 'context', 'synthesize', 'cite', 'ground'] as const;
 const STAGE_LABEL: Record<string, string> = {
   cache: 'Checking cache',
   plan: 'Planning scope',
   retrieve: 'Searching evidence',
+  context: 'Gathering architecture',
   synthesize: 'Drafting answer',
   cite: 'Resolving citations',
   ground: 'Verifying claims',
@@ -34,6 +37,7 @@ const isFail = (status: string) => status === 'fail' || status === 'empty';
    error (R1). Persona is threaded into every request (R6). */
 export function Ask() {
   const { personaId, persona } = usePersona();
+  const { depthId } = useDepth();
   const { setCitations } = useCitationDrawer();
   const [question, setQuestion] = useState(EXAMPLES[0]);
   const [answer, setAnswer] = useState<LiveAnswer | null>(null);
@@ -51,7 +55,10 @@ export function Ask() {
       setAnswer(null);
       setStages([]);
       try {
-        const result = await askStream(trimmed, personaId, (event) => {
+        const result = await askStream(
+          trimmed,
+          personaId,
+          (event) => {
           // Keep the latest event per stage, in pipeline order, so the checklist
           // shows one row per step (start → done) rather than a growing log.
           setStages((prev) => {
@@ -59,8 +66,10 @@ export function Ask() {
             next.push(event);
             next.sort((a, b) => STAGE_ORDER.indexOf(a.stage as never) - STAGE_ORDER.indexOf(b.stage as never));
             return next;
-          });
-        });
+            });
+          },
+          depthId,
+        );
         setAnswer(result);
         setCitations(result.citations);
       } catch (e) {
@@ -69,7 +78,7 @@ export function Ask() {
         setLoading(false);
       }
     },
-    [personaId, setCitations],
+    [personaId, depthId, setCitations],
   );
 
   // Ask on first load and whenever the persona changes (altitude changes, R6).
@@ -181,6 +190,7 @@ export function Ask() {
       <div className="composer">
         <div className="composer-inner">
           <PersonaSelect />
+          <DepthSelect />
           <input
             ref={inputRef}
             type="text"

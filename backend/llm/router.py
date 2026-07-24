@@ -31,7 +31,7 @@ from backend.llm.base import (
     RoutedResponse,
     UsageRecord,
 )
-from backend.llm.config import model_for, task_temperature, task_uses_json
+from backend.llm.config import max_tokens_for, model_for, task_temperature, task_uses_json
 
 
 class TokenSink(Protocol):
@@ -110,7 +110,11 @@ class LLMRouter:
             system=payload.get("system"),
             json_mode=task_uses_json(task_type),
             temperature=task_temperature(task_type),
-            max_tokens=int(payload.get("max_tokens", self._default_max_tokens)),
+            # Precedence: explicit per-request override (depth) > per-task ceiling
+            # (llm/config.py) > the router's global default. Before per-task
+            # ceilings existed, every task shared one number and synthesis was
+            # capped at the same size as a one-line verdict.
+            max_tokens=int(payload.get("max_tokens") or max_tokens_for(task_type)),
             task_type=task_type,
             prompt_version=prompt_version,
         )

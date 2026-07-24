@@ -29,14 +29,24 @@ def check_groundedness(
     *,
     answer_text: str,
     chunks: list[SearchHit],
+    context_block: str = "",
     persona: Persona | None = None,
     prompt_version: str = GROUNDEDNESS_PROMPT_VERSION,
 ) -> GroundednessResult:
     """Route a claim-by-claim groundedness check and parse the verdict.
 
+    ``context_block`` must be the *same* architectural context synthesis was given.
+    The gate has to judge against the material the model actually saw: when
+    synthesis gained service/module summaries and the judge did not, it correctly
+    but uselessly rejected summary-level claims ("the quota governor approves
+    budgets before indexing") that no single code chunk states — turning a better
+    answer into a refusal. Summaries are themselves derived from the indexed code
+    by the tier pipeline, so supporting a claim is legitimate grounding; the
+    citation gate separately still requires every claim to cite a real chunk.
+
     A malformed verdict is treated conservatively as *not grounded* — the gate
     fails closed even on its own uncertainty."""
-    prompt = _render_prompt(answer_text, chunks)
+    prompt = _render_prompt(answer_text, chunks, context_block)
     response = router.route(TaskType.GROUNDEDNESS, prompt_version, {"prompt": prompt}, persona)
     try:
         return GroundednessResult.model_validate(response.parsed or {})
@@ -44,17 +54,26 @@ def check_groundedness(
         return GroundednessResult(grounded=False, unsupported_claims=["unparseable verdict"])
 
 
-def _render_prompt(answer_text: str, chunks: list[SearchHit]) -> str:
+def _render_prompt(answer_text: str, chunks: list[SearchHit], context_block: str = "") -> str:
     evidence = "\n".join(f"- [{c.chunk_id}] {c.path}:{c.span}\n{c.content}" for c in chunks)
+    context = (
+        f"\n# ARCHITECTURAL CONTEXT (also supports claims)\n{context_block}\n"
+        if context_block
+        else ""
+    )
     # Judge the prose claims, not the illustrations. A fenced code/Mermaid block
     # restates cited prose visually; its markup is not an independent claim, and
     # feeding raw diagram syntax to the judge invites spurious "unsupported" flags.
     # The prompt requires every claim to appear (and be cited) in prose, so nothing
     # load-bearing hides in a diagram.
     prose = strip_fenced_blocks(answer_text)
+    # Only point the judge at a section that exists — naming an absent
+    # ARCHITECTURAL CONTEXT would have it look for material that is not there.
+    sources = "the EVIDENCE or the ARCHITECTURAL CONTEXT" if context_block else "the EVIDENCE"
     return (
-        "Check every claim in the ANSWER against the EVIDENCE. Return JSON "
+        "Check every claim in the ANSWER against the material below. Return JSON "
         '{"grounded": bool, "unsupported_claims": [string]}. A claim is grounded '
-        "only if the evidence directly supports it.\n\n"
-        f"# ANSWER\n{prose}\n\n# EVIDENCE\n{evidence}"
+        f"if {sources} supports it. Flag a claim only when it is unsupported — not "
+        "merely because it paraphrases or combines several sources.\n\n"
+        f"# ANSWER\n{prose}\n{context}\n# EVIDENCE\n{evidence}"
     )

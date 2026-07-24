@@ -27,7 +27,7 @@ from backend.api.answer_schemas import AskRequest
 from backend.api.coverage import CoverageRow, CoverageService
 from backend.api.review_schemas import ReviewAction
 from backend.api.schemas import HealthResponse, SearchRequest, SearchResponse
-from backend.domain.models import Persona
+from backend.domain.models import Depth, Persona
 from backend.flows.models import FlowNarrative
 from backend.flows.service import FlowNarrativeService, FlowNotFoundError
 from backend.observability.metrics import MetricsCollector, MetricsSnapshot
@@ -122,7 +122,7 @@ def create_app(
 
     @app.post("/ask", response_model=Answer, tags=["answer"])
     def ask(req: AskRequest, service: AnswerDep) -> Answer:
-        return service.answer(req.question, req.persona)
+        return service.answer(req.question, req.persona, req.depth)
 
     @app.post("/ask/stream", tags=["answer"])
     def ask_stream(req: AskRequest, service: AnswerDep) -> StreamingResponse:
@@ -131,7 +131,7 @@ def create_app(
         # answer is already computed. `X-Accel-Buffering: no` stops nginx from
         # buffering the stream and defeating that.
         return StreamingResponse(
-            _sse(service, req.question, req.persona),
+            _sse(service, req.question, req.persona, req.depth),
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
         )
@@ -186,14 +186,16 @@ def _flow_action(action: Callable[[], FlowNarrative]) -> FlowNarrative:
         raise HTTPException(status_code=404, detail=f"flow {exc} not found") from exc
 
 
-def _sse(service: AnswerService, question: str, persona: Persona) -> Iterator[str]:
+def _sse(
+    service: AnswerService, question: str, persona: Persona, depth: Depth
+) -> Iterator[str]:
     """Stream the answer path as SSE: a ``stage`` event as each pipeline step runs,
     then a final ``done`` event with the answer (citations / refusal metadata).
 
     The generator is the live pipeline, so events are flushed as the work happens —
     the client sees "Searching…", "Drafting…", "Verifying…" while the slow gateway
     calls are still in flight, instead of nothing until the whole answer is ready."""
-    for item in service.stream(question, persona):
+    for item in service.stream(question, persona, depth):
         if isinstance(item, AnswerStage):
             yield _event("stage", item.model_dump())
         else:  # the terminal Answer — exactly one, last

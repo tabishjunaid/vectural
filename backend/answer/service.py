@@ -20,15 +20,22 @@ from pydantic import BaseModel
 
 from backend.answer.cache import SemanticAnswerCache
 from backend.answer.citations import resolve_citations
+from backend.answer.context import (
+    StructuralContext,
+    gather_context,
+    render_context_block,
+)
+from backend.answer.depth import budget_for
 from backend.answer.groundedness import check_groundedness
 from backend.answer.models import Answer, AnswerMode
 from backend.answer.plan import RetrievalPlanner
 from backend.answer.synthesis import synthesise
-from backend.domain.models import Persona
+from backend.domain.models import Depth, Persona
 from backend.freshness.state import FreshnessState
 from backend.llm.router import LLMRouter
 from backend.retrieval.base import SearchHit
 from backend.retrieval.service import RetrievalService
+from backend.summarise.store import SummaryStore
 
 
 class FlowEvidenceProvider(Protocol):
@@ -73,30 +80,42 @@ class AnswerService:
     flows: FlowEvidenceProvider | None = None
     freshness: FreshnessState | None = None
     metrics: AnswerMetrics | None = None
+    # Tier-2/3 summaries and the call graph — background that turns a pile of
+    # fragments into an explanation. Optional so the in-memory demo still runs.
+    summaries: SummaryStore | None = None
+    structural: StructuralContext | None = None
     commit_sha: str = "WORKING"
     top_n: int = 5
 
-    def answer(self, question: str, persona: Persona = Persona.ENGINEER) -> Answer:
+    def answer(
+        self,
+        question: str,
+        persona: Persona = Persona.ENGINEER,
+        depth: Depth = Depth.STANDARD,
+    ) -> Answer:
         """Answer a question, timing it and recording answer-path metrics (§7.1)."""
         start = time.perf_counter()
-        result = self._compute(question, persona)
+        result = self._compute(question, persona, depth)
         if self.metrics is not None:
             self.metrics.record_latency_ms((time.perf_counter() - start) * 1000.0)
             self.metrics.record_answer(result.mode)
         return result
 
-    def _compute(self, question: str, persona: Persona) -> Answer:
+    def _compute(self, question: str, persona: Persona, depth: Depth) -> Answer:
         """The terminal answer, draining the staged pipeline. The single Answer is
         always the last item :meth:`stream` yields."""
         result: Answer | None = None
-        for item in self.stream(question, persona):
+        for item in self.stream(question, persona, depth):
             if isinstance(item, Answer):
                 result = item
         assert result is not None  # the pipeline always yields exactly one Answer
         return result
 
     def stream(
-        self, question: str, persona: Persona = Persona.ENGINEER
+        self,
+        question: str,
+        persona: Persona = Persona.ENGINEER,
+        depth: Depth = Depth.STANDARD,
     ) -> Iterator[AnswerStage | Answer]:
         """Walk the answer path, emitting an :class:`AnswerStage` as each stage
         starts/finishes and the terminal :class:`Answer` last.
@@ -111,7 +130,7 @@ class AnswerService:
         # Fast path: semantic cache hit — no gateway call at all (§5.5).
         if self.cache is not None:
             yield AnswerStage("cache", "start", "Checking the answer cache")
-            cached = self.cache.get(question, self.commit_sha, persona)
+            cached = self.cache.get(question, self.commit_sha, persona, depth)
             if cached is not None:
                 yield AnswerStage("cache", "hit", "Answered from cache — no model call")
                 yield cached.model_copy(
@@ -129,8 +148,9 @@ class AnswerService:
         scope_label = ", ".join(sorted(plan.scope)) if plan.scope else "the whole estate"
         yield AnswerStage("plan", "ok", f"Scope: {scope_label}")
 
+        budget = budget_for(depth)
         yield AnswerStage("retrieve", "start", "Searching the indexed code and docs")
-        hits = self.retrieval.search(question, services=plan.scope, top_n=self.top_n)
+        hits = self.retrieval.search(question, services=plan.scope, top_n=budget.top_n)
 
         # Prefer reviewed cross-service narratives over live reconstruction
         # (§Phase 7 exit criterion): prepend approved flow evidence so synthesis
@@ -150,8 +170,32 @@ class AnswerService:
             return
         yield AnswerStage("retrieve", "ok", f"Found {len(hits)} passages of evidence")
 
+        # Background that fragments cannot supply: what the touched services and
+        # modules are responsible for, and how they depend on each other.
+        ctx = gather_context(
+            anchors=plan.anchors,
+            hits=hits,
+            summaries=self.summaries,
+            structural=self.structural,
+        )
+        context_block = render_context_block(ctx)
+        if context_block:
+            yield AnswerStage(
+                "context",
+                "ok",
+                f"Added {len(ctx.services)} service and {len(ctx.modules)} module summaries",
+            )
+
         yield AnswerStage("synthesize", "start", "Drafting an answer from the evidence")
-        response = synthesise(self.router, question=question, persona=persona, chunks=hits)
+        response = synthesise(
+            self.router,
+            question=question,
+            persona=persona,
+            chunks=hits,
+            context_block=context_block,
+            evidence_chars=budget.evidence_chars,
+            max_tokens=budget.max_tokens,
+        )
         answer_text = response.text
         yield AnswerStage("synthesize", "ok", "Draft written")
 
@@ -172,7 +216,13 @@ class AnswerService:
         # Gate 2 — groundedness, a separate Haiku call (§5.4).
         yield AnswerStage("ground", "start", "Verifying each claim against the evidence")
         grounded = check_groundedness(
-            self.router, answer_text=answer_text, chunks=hits, persona=persona
+            self.router,
+            answer_text=answer_text,
+            chunks=hits,
+            # The judge must see what synthesis saw, or context-derived claims are
+            # rejected for being unverifiable against chunks alone.
+            context_block=context_block,
+            persona=persona,
         )
         if not grounded.grounded:
             # Name the offending claim. The gate already identifies it, and
@@ -199,7 +249,7 @@ class AnswerService:
             return
 
         if self.cache is not None:
-            self.cache.put(question, self.commit_sha, persona, answer)
+            self.cache.put(question, self.commit_sha, persona, answer, depth)
         yield answer
 
 

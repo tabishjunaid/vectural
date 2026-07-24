@@ -24,6 +24,20 @@ class Persona(StrEnum):
     ARCHITECT = "architect"
 
 
+class Depth(StrEnum):
+    """How thorough an answer to produce — orthogonal to :class:`Persona`.
+
+    Persona sets the *altitude* (engineer vs business owner); depth sets the
+    *budget* (how much evidence is gathered and how long the answer may run).
+    Separate because they vary independently: an engineer may want a one-line
+    answer, a business owner a thorough briefing. Deep costs materially more per
+    question, so it is opt-in rather than the default."""
+
+    BRIEF = "brief"
+    STANDARD = "standard"
+    DEEP = "deep"
+
+
 class TaskType(StrEnum):
     """Every distinct call the routing layer (§5.1) can make.
 

@@ -5,6 +5,7 @@
    backend in dev (vite) and prod (nginx). */
 
 import type { Citation, CoverageRow, PersonaId, ReviewItem } from './mock-data';
+import type { DepthId } from './depth';
 
 const BASE = import.meta.env.VITE_API_BASE ?? '/api';
 
@@ -118,8 +119,12 @@ function adaptAnswer(a: BackendAnswer): LiveAnswer {
 
 // ---- public API -----------------------------------------------------------
 
-export function ask(question: string, persona: PersonaId): Promise<LiveAnswer> {
-  return post<BackendAnswer>('/ask', { question, persona }).then(adaptAnswer);
+export function ask(
+  question: string,
+  persona: PersonaId,
+  depth: DepthId = 'standard',
+): Promise<LiveAnswer> {
+  return post<BackendAnswer>('/ask', { question, persona, depth }).then(adaptAnswer);
 }
 
 /* One progress event on the answer path (backend AnswerStage). `status` is
@@ -139,11 +144,12 @@ export async function askStream(
   question: string,
   persona: PersonaId,
   onStage: (event: AnswerStageEvent) => void,
+  depth: DepthId = 'standard',
 ): Promise<LiveAnswer> {
   const res = await fetch(`${BASE}/ask/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, persona }),
+    body: JSON.stringify({ question, persona, depth }),
   });
   if (!res.ok || !res.body) throw new Error(`POST /ask/stream → ${res.status}`);
 
