@@ -145,6 +145,15 @@ html, body, #root {
 }
 .answer-mode-tag.streaming { color: var(--accent); background: var(--accent-weak); border-color: #cdd7fa; }
 
+/* Follow-up questions under an answer or refusal — the drill-down affordance.
+   Separated by a rule so it reads as "what next", not as part of the answer. */
+.follow-ups { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.follow-ups-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-faint); margin-bottom: 8px;
+}
+.follow-ups .scenario-bar { margin-bottom: 0; }
+
 /* Live answer-path progress (Ask). One row per pipeline stage: pending stages
    pulse, finished stages check off, a failed gate marks red. */
 .stage-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -175,14 +184,36 @@ html, body, #root {
   vertical-align: middle; animation: blink 1s steps(1) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
+/* Jump-to nav on top of a multi-section answer. Sticky within the scrolling
+   .answer-card: the negative top + matching top padding cover the card's own
+   padding strip so scrolling prose slides cleanly under it. */
 .answer-outline {
-  display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-dim);
-  border-bottom: 1px dashed var(--border); padding-bottom: 10px; margin-bottom: 12px;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+  font-size: 12px; color: var(--text-dim);
+  border-bottom: 1px dashed var(--border); padding-bottom: 10px; margin-bottom: 14px;
+  position: sticky; top: -16px; z-index: 2; background: var(--panel);
+  padding-top: 16px; margin-top: -16px;
 }
-.answer-outline a { color: var(--accent); text-decoration: none; }
+.answer-outline a { color: var(--accent); text-decoration: none; cursor: pointer; }
+.answer-outline a:hover { text-decoration: underline; }
 .answer-outline .outline-label {
   color: var(--text-faint); font-weight: 700; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.03em;
 }
+
+/* Each ## section of a synthesized answer, rendered as its own card. */
+.answer-sections { display: flex; flex-direction: column; }
+.answer-section {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px 16px; margin-bottom: 12px; scroll-margin-top: 8px;
+}
+.answer-section:last-child { margin-bottom: 0; }
+/* The Diagram section is already a panel (.mermaid-diagram) — no box-in-a-box. */
+.answer-section.no-box { border: none; padding: 0; }
+.answer-section-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-dim); margin-bottom: 8px;
+}
+.answer-section.no-box .answer-section-label { margin-bottom: 4px; }
 .answer-body h3 { font-size: 15px; margin: 16px 0 8px; }
 .answer-body h3:first-child { margin-top: 0; }
 .answer-body h4 { font-size: 13.5px; margin: 14px 0 6px; color: var(--text-dim); }

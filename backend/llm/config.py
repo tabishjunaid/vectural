@@ -31,7 +31,7 @@ _TASK_MODEL: dict[TaskType, ModelName] = {
 # this per request from the depth budget (backend/answer/depth.py).
 _DEFAULT_MAX_TOKENS = 1024
 _TASK_MAX_TOKENS: dict[TaskType, int] = {
-    TaskType.SYNTHESIS: 2000,  # prose answer; depth raises/lowers this per request
+    TaskType.SYNTHESIS: 3500,  # prose answer; depth raises/lowers this per request
     TaskType.FLOW_NARRATIVE: 2000,  # tier 4 is a multi-paragraph narrative
     TaskType.SERVICE_SUMMARY: 1500,  # tier 3 aggregates a whole service
 }

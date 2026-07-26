@@ -21,11 +21,13 @@ from pydantic import BaseModel
 from backend.answer.cache import SemanticAnswerCache
 from backend.answer.citations import resolve_citations
 from backend.answer.context import (
+    AnswerContext,
     StructuralContext,
     gather_context,
     render_context_block,
 )
 from backend.answer.depth import budget_for
+from backend.answer.followups import suggest_followups
 from backend.answer.groundedness import check_groundedness
 from backend.answer.models import Answer, AnswerMode
 from backend.answer.plan import RetrievalPlanner
@@ -166,6 +168,12 @@ class AnswerService:
                 question=question,
                 reason="no reliable coverage — no evidence retrieved",
                 likely_services=plan.anchors,
+                # Nothing was retrieved, so there is no context to draw on — but
+                # the planner's anchors still name where to look, and a reader who
+                # got nothing back needs a next step more than anyone.
+                follow_ups=suggest_followups(
+                    AnswerContext(), [], question, likely_services=plan.anchors
+                ),
             )
             return
         yield AnswerStage("retrieve", "ok", f"Found {len(hits)} passages of evidence")
@@ -179,6 +187,9 @@ class AnswerService:
             structural=self.structural,
         )
         context_block = render_context_block(ctx)
+        # Computed once here so every exit below — both refusals and the answer —
+        # can offer somewhere to go next.
+        follow_ups = suggest_followups(ctx, [], question)
         if context_block:
             yield AnswerStage(
                 "context",
@@ -209,6 +220,7 @@ class AnswerService:
                 question=question,
                 reason="citation could not be resolved to retrieved evidence",
                 likely_services=_likely(plan.anchors, hits),
+                follow_ups=follow_ups,
             )
             return
         yield AnswerStage("cite", "ok", f"{len(resolution.resolved)} citations resolved")
@@ -235,12 +247,17 @@ class AnswerService:
                 question=question,
                 reason=_ungrounded_reason(grounded.unsupported_claims),
                 likely_services=_likely(plan.anchors, hits),
+                follow_ups=follow_ups,
             )
             return
         yield AnswerStage("ground", "ok", "All claims grounded")
 
         answer = Answer.synthesized(
-            persona=persona, question=question, text=answer_text, citations=resolution.resolved
+            persona=persona,
+            question=question,
+            text=answer_text,
+            citations=resolution.resolved,
+            follow_ups=suggest_followups(ctx, resolution.resolved, question),
         )
         # Visible staleness: if a contributing service is mid-reindex, serve the
         # answer but flag it (§4.4). Stale answers are not cached.

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AppShell, COVERAGE_PCT } from '../components/AppShell';
-import { AnswerMarkdown } from '../components/AnswerMarkdown';
+import { AnswerSections } from '../components/AnswerSections';
 import { SourcesRail } from '../components/SourcesRail';
 import { PersonaSelect } from '../components/PersonaSelect';
 import { useCitationDrawer } from '../components/citation';
@@ -31,6 +31,26 @@ const STAGE_LABEL: Record<string, string> = {
 // Terminal statuses (anything but 'start') mean the stage finished.
 const isDone = (status: string) => status !== 'start';
 const isFail = (status: string) => status === 'fail' || status === 'empty';
+
+
+/* Grounded questions to explore next. Every suggestion is keyed on a relationship
+   the graph actually holds, so clicking one always lands on real evidence rather
+   than a refusal. Reuses the example-chip styling. */
+function FollowUps({ questions, onAsk }: { questions: string[]; onAsk: (q: string) => void }) {
+  if (!questions.length) return null;
+  return (
+    <div className="follow-ups">
+      <div className="follow-ups-label">Explore further</div>
+      <div className="scenario-bar">
+        {questions.map((q) => (
+          <button key={q} className="scenario-btn" onClick={() => onAsk(q)}>
+            {q}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /* Ask — live wired to POST /ask. Renders the backend's terminal states
    (synthesized / instant / refusal). Refusal is a first-class state, not an
@@ -86,6 +106,12 @@ export function Ask() {
     void run(question);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [personaId]);
+
+  const askFollowUp = (q: string) => {
+    setQuestion(q);
+    if (inputRef.current) inputRef.current.value = q;
+    void run(q);
+  };
 
   const send = () => {
     const q = inputRef.current?.value ?? question;
@@ -170,6 +196,7 @@ export function Ask() {
                     View coverage schedule for {answer.likelyServices[0]} →
                   </Link>
                 )}
+                <FollowUps questions={answer.followUps} onAsk={askFollowUp} />
               </div>
             )}
 
@@ -179,8 +206,9 @@ export function Ask() {
                   ● {answer.mode === 'instant' ? 'Instant · no gateway call' : 'Synthesized answer'}
                   {answer.stale && ' · may be stale'}
                 </span>
-                <AnswerMarkdown markdown={answer.markdown} />
+                <AnswerSections markdown={answer.markdown} />
                 <SourcesRail citationIds={answer.citationIds} persona={personaId} />
+                <FollowUps questions={answer.followUps} onAsk={askFollowUp} />
               </div>
             )}
           </div>

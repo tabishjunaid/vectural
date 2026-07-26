@@ -93,6 +93,10 @@ def resolve_citations(text: str, retrieved: list[SearchHit]) -> CitationResoluti
             Citation(
                 index=len(resolved) + 1,
                 chunk_id=hit.chunk_id,
+                # Record the marker as written, not the id it resolved to: the
+                # client rewrites `[marker]` → `[n]` to render a chip, and the two
+                # differ whenever the model abbreviated.
+                marker=marker,
                 service=hit.service,
                 path=hit.path,
                 span=hit.span,

@@ -29,7 +29,7 @@ from backend.summarise.tiers import module_key
 
 # Bounded so context never crowds out the evidence it is meant to frame.
 MAX_MODULES = 8
-MAX_SERVICES = 4
+MAX_SERVICES = 6
 MAX_RELATED = 8
 
 
@@ -45,6 +45,11 @@ class AnswerContext:
     services: list[tuple[str, str]] = field(default_factory=list)  # (name, description)
     modules: list[tuple[str, str]] = field(default_factory=list)  # (key, responsibility)
     edges: list[str] = field(default_factory=list)  # "a → b, c" / "a ← d"
+    # The same call-graph facts as `edges`, kept structured. `edges` is prose for
+    # the prompt; follow-up suggestions need to key on the actual neighbours, and
+    # re-parsing rendered strings to get them back would be silly.
+    callees: dict[str, list[str]] = field(default_factory=dict)
+    callers: dict[str, list[str]] = field(default_factory=dict)
 
     def is_empty(self) -> bool:
         return not (self.services or self.modules or self.edges)
@@ -96,8 +101,10 @@ def gather_context(
                 continue
             if callees:
                 ctx.edges.append(f"{service} calls: {', '.join(callees)}")
+                ctx.callees[service] = callees
             if callers:
                 ctx.edges.append(f"{service} is called by: {', '.join(callers)}")
+                ctx.callers[service] = callers
 
     return ctx
 

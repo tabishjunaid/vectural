@@ -99,7 +99,12 @@ def test_synthesis_prompt_truncates_and_says_so() -> None:
     huge = "x" * (EVIDENCE_CHARS_PER_CHUNK * 3)
     prompt = render_synthesis_prompt("q", Persona.ENGINEER, [_hit("a", huge)])
     assert "… (truncated)" in prompt  # marked, so a cut chunk is not read as complete
-    assert len(prompt) < len(huge)  # and actually bounded
+    # The evidence body is actually bounded to the budget: no run of the chunk's
+    # content longer than the limit survives, and the whole chunk certainly doesn't.
+    # (Asserted on the content run, not total prompt length — the instruction block
+    # is fixed overhead unrelated to truncation.)
+    assert "x" * (EVIDENCE_CHARS_PER_CHUNK + 1) not in prompt
+    assert huge not in prompt
 
 
 def _hit_id(chunk_id: str) -> SearchHit:

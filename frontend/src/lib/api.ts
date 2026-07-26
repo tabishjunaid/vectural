@@ -30,6 +30,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 interface BackendCitation {
   index: number;
   chunk_id: string;
+  marker: string; // the text the model actually wrote between the brackets
   service: string;
   path: string;
   span: { start: number; end: number };
@@ -45,6 +46,7 @@ interface BackendAnswer {
   likely_services: string[];
   from_cache: boolean;
   stale: boolean;
+  follow_ups: string[];
 }
 
 interface BackendFlow {
@@ -72,6 +74,7 @@ export interface LiveAnswer {
   likelyServices: string[];
   fromCache: boolean;
   stale: boolean;
+  followUps: string[]; // grounded questions to explore next
 }
 
 function basename(path: string): string {
@@ -95,12 +98,19 @@ function toCitation(c: BackendCitation, stale: boolean): Citation {
 }
 
 function adaptAnswer(a: BackendAnswer): LiveAnswer {
-  // Rewrite each [chunk_id] marker to its 1-based display index so the existing
-  // CitationChip / SourcesRail rendering (which is numeric) works unchanged.
+  // Rewrite each citation marker to its 1-based display index so the existing
+  // CitationChip / SourcesRail rendering (which matches [n]) works unchanged.
+  //
+  // Replace `marker` — the text the model actually wrote — not just `chunk_id`.
+  // Models abbreviate the long service:path:lines:hash id down to its trailing
+  // hash, so matching on chunk_id alone silently found nothing and left the
+  // citation as dead text with no chip and no way to drill down.
   let markdown = a.text;
   const citations: Record<number, Citation> = {};
   for (const c of a.citations) {
-    markdown = markdown.split(`[${c.chunk_id}]`).join(`[${c.index}]`);
+    for (const form of [c.marker, c.chunk_id]) {
+      if (form) markdown = markdown.split(`[${form}]`).join(`[${c.index}]`);
+    }
     citations[c.index] = toCitation(c, a.stale);
   }
   return {
@@ -114,6 +124,7 @@ function adaptAnswer(a: BackendAnswer): LiveAnswer {
     likelyServices: a.likely_services,
     fromCache: a.from_cache,
     stale: a.stale,
+    followUps: a.follow_ups ?? [],
   };
 }
 

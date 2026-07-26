@@ -26,6 +26,12 @@ class Citation(BaseModel):
 
     index: int  # 1-based display order
     chunk_id: str
+    # The text that actually appeared between the brackets. Models abbreviate the
+    # long `service:path:lines:hash` id to its trailing hash, and the resolver
+    # accepts that (citations.py). Without recording which form was used, a client
+    # cannot find the marker to turn into a chip — it searches for the full id,
+    # finds nothing, and the citation renders as dead text.
+    marker: str = ""
     service: str
     path: str
     span: Span
@@ -43,10 +49,19 @@ class Answer(BaseModel):
     from_cache: bool = False
     # Serving continues during a reindex with a *visible* staleness flag (§4.4, R3).
     stale: bool = False
+    # Grounded questions to explore next (§5.5 drill-down). Present on refusals
+    # too — that is where a reader most needs to know what they *can* ask.
+    follow_ups: list[str] = Field(default_factory=list)
 
     @classmethod
     def synthesized(
-        cls, *, persona: Persona, question: str, text: str, citations: list[Citation]
+        cls,
+        *,
+        persona: Persona,
+        question: str,
+        text: str,
+        citations: list[Citation],
+        follow_ups: list[str] | None = None,
     ) -> Answer:
         return cls(
             mode=AnswerMode.SYNTHESIZED,
@@ -54,11 +69,18 @@ class Answer(BaseModel):
             question=question,
             text=text,
             citations=citations,
+            follow_ups=follow_ups or [],
         )
 
     @classmethod
     def refusal(
-        cls, *, persona: Persona, question: str, reason: str, likely_services: list[str]
+        cls,
+        *,
+        persona: Persona,
+        question: str,
+        reason: str,
+        likely_services: list[str],
+        follow_ups: list[str] | None = None,
     ) -> Answer:
         # The refusal wording is the same source of truth the coverage surface uses
         # (§5.4), so the two never contradict each other about a service.
@@ -74,6 +96,7 @@ class Answer(BaseModel):
             text=text,
             reason=reason,
             likely_services=likely_services,
+            follow_ups=follow_ups or [],
         )
 
     @classmethod

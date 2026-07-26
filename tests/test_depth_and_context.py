@@ -54,6 +54,11 @@ def test_depth_widens_every_knob_together() -> None:
     assert brief.top_n < standard.top_n < deep.top_n
     assert brief.evidence_chars < standard.evidence_chars < deep.evidence_chars
     assert brief.max_tokens < standard.max_tokens < deep.max_tokens
+    # BRIEF stays the fast one-glance summary; STANDARD (the default) and DEEP are
+    # lifted to feed a full explanatory answer, not a terse list.
+    assert brief.max_tokens == 800
+    assert standard.max_tokens >= 3000
+    assert deep.max_tokens >= 6000
 
 
 def test_synthesis_gets_its_own_output_ceiling() -> None:
@@ -218,3 +223,34 @@ def test_cache_key_includes_depth() -> None:
 
     assert cache.get("q", "sha", Persona.ENGINEER, Depth.BRIEF) is not None
     assert cache.get("q", "sha", Persona.ENGINEER, Depth.DEEP) is None  # must recompute
+
+
+def test_prompt_demands_separate_sections_not_one_paragraph() -> None:
+    """Regression: 'Details' was a single numbered item asking for mechanism +
+    components + config + caveats, so the model compressed all four into one
+    paragraph that read as a summary. Each is now its own required section."""
+    prompt = render_synthesis_prompt("q", Persona.ENGINEER, [_hit("svc", "a.py")])
+    for section in ("How it works", "Key components", "Configuration", "Caveats"):
+        assert section in prompt
+    assert "its own `## ` heading with its own content" in prompt
+    assert "never merge two sections" in prompt
+
+
+def test_prompt_mandates_level_two_headings_for_the_ui_contract() -> None:
+    """The frontend splits the answer on `## ` headings (AnswerSections.tsx). The
+    prompt must pin that exact format and the canonical section names, or the
+    multi-section layout silently collapses back to one flat card."""
+    prompt = render_synthesis_prompt("q", Persona.ENGINEER, [_hit("svc", "a.py")])
+    assert "level-2 markdown heading" in prompt
+    for heading in ("## Summary", "## How it works", "## Key components", "## Caveats"):
+        assert heading in prompt
+
+
+def test_prompt_pushes_for_thorough_prose_not_compression() -> None:
+    """synth-v5 changes the voice from terse report to full explanation: it must
+    push for thoroughness (so answers stop reading as summaries) while still
+    forbidding invented detail (so the groundedness gate stays satisfiable)."""
+    prompt = render_synthesis_prompt("q", Persona.ENGINEER, [_hit("svc", "a.py")])
+    assert "as thorough as the evidence allows" in prompt
+    assert "do not hold back" in prompt
+    assert "do not invent detail" in prompt

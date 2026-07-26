@@ -11,7 +11,11 @@ material the model gets and how much it may write:
 - ``max_tokens``     — the answer's output ceiling
 
 The costs are real and superlinear-ish in combination, which is why ``DEEP`` is
-opt-in: it is roughly 5x a ``BRIEF`` answer per question.
+opt-in: it is roughly 8x a ``BRIEF`` answer per question. ``STANDARD`` (the
+default) and ``DEEP`` both feed the model enough evidence to write a full,
+explanatory answer rather than a terse list — richer prose only stays grounded
+if there is more evidence behind it, so breadth and the output ceiling rise
+together. ``BRIEF`` is left small on purpose: the fast, one-glance summary.
 """
 
 from __future__ import annotations
@@ -30,8 +34,8 @@ class DepthBudget:
 
 _BUDGETS: dict[Depth, DepthBudget] = {
     Depth.BRIEF: DepthBudget(top_n=4, evidence_chars=1200, max_tokens=800),
-    Depth.STANDARD: DepthBudget(top_n=8, evidence_chars=2000, max_tokens=2000),
-    Depth.DEEP: DepthBudget(top_n=14, evidence_chars=3500, max_tokens=4000),
+    Depth.STANDARD: DepthBudget(top_n=12, evidence_chars=2800, max_tokens=3500),
+    Depth.DEEP: DepthBudget(top_n=18, evidence_chars=4500, max_tokens=6500),
 }
 
 
