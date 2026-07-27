@@ -79,6 +79,45 @@ def test_no_context_yields_no_invented_suggestions() -> None:
     assert suggest_followups(AnswerContext(), [], "anything") == []
 
 
+def _cite(index: int, path: str, service: str = "vectural") -> Citation:
+    return Citation(
+        index=index,
+        chunk_id=f"{service}:{path}:1-9:h{index}",
+        marker=f"h{index}",
+        service=service,
+        path=path,
+        span=Span(start=1, end=9),
+    )
+
+
+def test_cited_modules_are_offered_first_ahead_of_graph_edges() -> None:
+    """The content-blindness fix: the answer cited retrieval and orchestration, so
+    the reader should be pointed at those — not only at service-topology edges
+    ('interact with java-core') they never read about."""
+    ctx = AnswerContext(
+        services=[("vectural", "The platform.")],
+        callees={"vectural": ["java-core", "reactive-spring"]},
+    )
+    citations = [
+        _cite(1, "vectural/backend/retrieval/bge_rerank.py"),
+        _cite(2, "vectural/backend/orchestration/__init__.py"),
+    ]
+    out = suggest_followups(ctx, citations, "how does vectural work")
+    assert out[:2] == [
+        "What is vectural/backend/retrieval responsible for?",
+        "What is vectural/backend/orchestration responsible for?",
+    ]
+    # graph-edge suggestions still appear, just after the relevant ones
+    assert "How does vectural interact with java-core?" in out
+
+
+def test_root_level_cited_files_are_not_offered_as_modules() -> None:
+    """A file at the service root has module_key == service, so 'what is <service>
+    responsible for' would just restate the question — skip it and fall back."""
+    out = suggest_followups(AnswerContext(), [_cite(1, "README.md")], "q")
+    assert out == ["What does vectural depend on?"]
+
+
 def test_capped_and_deduped() -> None:
     ctx = AnswerContext(
         services=[(f"svc{i}", "d") for i in range(6)],
