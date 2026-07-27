@@ -54,11 +54,15 @@ def test_depth_widens_every_knob_together() -> None:
     assert brief.top_n < standard.top_n < deep.top_n
     assert brief.evidence_chars < standard.evidence_chars < deep.evidence_chars
     assert brief.max_tokens < standard.max_tokens < deep.max_tokens
-    # BRIEF stays the fast one-glance summary; STANDARD (the default) and DEEP are
-    # lifted to feed a full explanatory answer, not a terse list.
+    # BRIEF stays the fast one-glance summary. STANDARD is now a full answer (what
+    # DEEP used to be). DEEP is the leave-nothing-out tier: the model's max output
+    # and near-untrimmed evidence, and the only depth that flips the exhaustive flag.
     assert brief.max_tokens == 800
-    assert standard.max_tokens >= 3000
-    assert deep.max_tokens >= 6000
+    assert standard.max_tokens >= 6000
+    assert deep.max_tokens >= 16000
+    assert deep.evidence_chars >= 2 * standard.evidence_chars
+    assert not brief.exhaustive and not standard.exhaustive
+    assert deep.exhaustive
 
 
 def test_synthesis_gets_its_own_output_ceiling() -> None:
@@ -244,6 +248,18 @@ def test_prompt_mandates_level_two_headings_for_the_ui_contract() -> None:
     assert "level-2 markdown heading" in prompt
     for heading in ("## Summary", "## How it works", "## Key components", "## Caveats"):
         assert heading in prompt
+
+
+def test_deep_mode_switches_prompt_to_exhaustive() -> None:
+    """DEEP (exhaustive=True) must override the terse per-section quantifiers and
+    push for full multi-paragraph explanation — the actual fix for one-line
+    answers. STANDARD must NOT carry that directive."""
+    standard = render_synthesis_prompt("q", Persona.ENGINEER, [_hit("svc", "a.py")])
+    deep = render_synthesis_prompt("q", Persona.ENGINEER, [_hit("svc", "a.py")], exhaustive=True)
+    assert "EXHAUSTIVE REQUEST" in deep
+    assert "do not optimise for brevity" in deep
+    assert "floor, not a ceiling" in deep  # the terse quantifiers are overridden
+    assert "EXHAUSTIVE REQUEST" not in standard  # default stays sectioned-but-bounded
 
 
 def test_prompt_pushes_for_thorough_prose_not_compression() -> None:

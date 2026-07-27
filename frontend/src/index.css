@@ -138,6 +138,11 @@ html, body, #root {
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 16px 18px; max-height: 70vh; overflow-y: auto;
 }
+/* Quiet placeholder shown before the user has asked anything (no auto-submit). */
+.ask-empty {
+  color: var(--text-faint); font-size: 14px; line-height: 1.55; max-width: 560px;
+  margin: 40px auto; text-align: center;
+}
 .answer-mode-tag {
   display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700;
   color: var(--green); background: #ecf7f0; border: 1px solid #cdeed9; border-radius: 999px;

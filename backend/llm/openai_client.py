@@ -78,12 +78,21 @@ class OpenAIGatewayClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": request.prompt})
 
-        kwargs: dict[str, Any] = {
-            "model": self._models[request.model],
-            "messages": messages,
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-        }
+        # A per-request model override (the model dropdown) picks the concrete id
+        # AND its API convention: newer OpenAI models take max_completion_tokens
+        # and reject a custom temperature, where gpt-4o* take max_tokens + temperature.
+        model = request.model_override or self._models[request.model]
+        kwargs: dict[str, Any] = {"model": model, "messages": messages}
+        if request.model_override and request.override_uses_max_completion_tokens:
+            kwargs["max_completion_tokens"] = request.max_tokens
+        else:
+            kwargs["max_tokens"] = request.max_tokens
+        if not request.model_override or request.override_supports_temperature:
+            kwargs["temperature"] = request.temperature
+        if request.override_reasoning_effort:
+            # Reasoning models (gpt-5 family): cap the hidden reasoning so it does
+            # not consume the completion budget meant for the grounded answer.
+            kwargs["reasoning_effort"] = request.override_reasoning_effort
         if request.json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 

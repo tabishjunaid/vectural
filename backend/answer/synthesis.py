@@ -14,7 +14,7 @@ from backend.llm.base import RoutedResponse
 from backend.llm.router import LLMRouter
 from backend.retrieval.base import SearchHit
 
-SYNTHESIS_PROMPT_VERSION = "synth-v5"
+SYNTHESIS_PROMPT_VERSION = "synth-v6"
 
 # How much of each retrieved chunk to put in front of the model.
 #
@@ -37,6 +37,7 @@ def render_synthesis_prompt(
     *,
     context_block: str = "",
     evidence_chars: int = EVIDENCE_CHARS_PER_CHUNK,
+    exhaustive: bool = False,
 ) -> str:
     evidence_lines = [
         f"- [{c.chunk_id}] {c.path}:{c.span} ({c.symbol or c.kind.value})\n"
@@ -52,6 +53,25 @@ def render_synthesis_prompt(
         if context_block
         else ""
     )
+    # DEEP mode: the reader explicitly asked for the complete picture, so override
+    # the terse quantifiers below ("one bullet", "a sentence or two") and push for
+    # full, multi-paragraph explanation. This is the actual fix for one-line
+    # answers — the token ceiling was never the thing making them short.
+    depth_note = (
+        "THIS IS A DEEP, EXHAUSTIVE REQUEST. The reader wants the complete "
+        "end-to-end picture and there is no length limit to respect but the "
+        "model's own — do not optimise for brevity. Explain every relevant "
+        "concept in FULL: write a short paragraph (not one line) per step and per "
+        "component, and cover the reasoning (why it is built this way), the data "
+        "that flows through it, the inputs and outputs, the edge cases, and how "
+        "each piece connects to the rest. Where the sections below say 'one "
+        "bullet' or 'a sentence or two', treat that as a floor, not a ceiling — "
+        "expand freely. Do not compress, summarise, or abbreviate to save space; "
+        "if a component deserves three paragraphs, write three. Leave nothing "
+        "material out.\n\n"
+        if exhaustive
+        else ""
+    )
     return (
         f"{persona_instruction(persona)}\n\n"
         "Write a thorough, explanatory answer grounded ONLY in the evidence below. "
@@ -60,6 +80,7 @@ def render_synthesis_prompt(
         "together and why it is built the way it is. Use the depth the evidence "
         "supports; a well-covered question deserves a full walkthrough, not a "
         "summary.\n\n"
+        f"{depth_note}"
         "FORMAT — write each section as a level-2 markdown heading, exactly "
         "`## <Name>`, using these names verbatim and in this order (the UI splits "
         "the answer on these headings, so the `## ` prefix and the names are a "
@@ -121,14 +142,25 @@ def synthesise(
     context_block: str = "",
     evidence_chars: int = EVIDENCE_CHARS_PER_CHUNK,
     max_tokens: int | None = None,
+    exhaustive: bool = False,
+    model_override_id: str | None = None,
     prompt_version: str = SYNTHESIS_PROMPT_VERSION,
 ) -> RoutedResponse:
     prompt = render_synthesis_prompt(
-        question, persona, chunks, context_block=context_block, evidence_chars=evidence_chars
+        question,
+        persona,
+        chunks,
+        context_block=context_block,
+        evidence_chars=evidence_chars,
+        exhaustive=exhaustive,
     )
     payload: dict[str, object] = {"prompt": prompt}
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if model_override_id:
+        # Route this synthesis call to the user-chosen model/provider (the model
+        # dropdown); the router resolves it against the catalog.
+        payload["model_override_id"] = model_override_id
     return router.route(TaskType.SYNTHESIS, prompt_version, payload, persona)
 
 

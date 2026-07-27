@@ -23,6 +23,21 @@ class GroundednessResult(BaseModel):
     grounded: bool
     unsupported_claims: list[str] = Field(default_factory=list)
 
+    @property
+    def should_withhold(self) -> bool:
+        """Withhold the answer only when a *specific* unsupported claim is named.
+
+        A bare ``grounded: false`` with an empty ``unsupported_claims`` is a
+        self-contradictory verdict — the judge declared the answer ungrounded but
+        could not point to anything. Smaller judge models emit this on long
+        answers, and it was refusing well-grounded answers on a non-actionable
+        signal. Fail-closed is preserved where it matters: a genuinely
+        unsupported claim is named (→ withhold), and a malformed/unparseable
+        verdict is recorded as an explicit ``"unparseable verdict"`` claim below
+        (→ withhold). The citation gate has already verified every claim cites a
+        real chunk before this gate runs."""
+        return bool(self.unsupported_claims)
+
 
 def check_groundedness(
     router: LLMRouter,

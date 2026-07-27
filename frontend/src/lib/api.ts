@@ -130,12 +130,26 @@ function adaptAnswer(a: BackendAnswer): LiveAnswer {
 
 // ---- public API -----------------------------------------------------------
 
+/* An answer-model choice for the composer dropdown (GET /models). Populated from
+   the backend so it only ever lists models whose provider gateway is wired. */
+export interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  hint: string;
+}
+
+export function getModels(): Promise<ModelOption[]> {
+  return get<ModelOption[]>('/models');
+}
+
 export function ask(
   question: string,
   persona: PersonaId,
   depth: DepthId = 'standard',
+  model?: string,
 ): Promise<LiveAnswer> {
-  return post<BackendAnswer>('/ask', { question, persona, depth }).then(adaptAnswer);
+  return post<BackendAnswer>('/ask', { question, persona, depth, model }).then(adaptAnswer);
 }
 
 /* One progress event on the answer path (backend AnswerStage). `status` is
@@ -156,11 +170,12 @@ export async function askStream(
   persona: PersonaId,
   onStage: (event: AnswerStageEvent) => void,
   depth: DepthId = 'standard',
+  model?: string,
 ): Promise<LiveAnswer> {
   const res = await fetch(`${BASE}/ask/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, persona, depth }),
+    body: JSON.stringify({ question, persona, depth, model }),
   });
   if (!res.ok || !res.body) throw new Error(`POST /ask/stream → ${res.status}`);
 

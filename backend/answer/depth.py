@@ -11,11 +11,15 @@ material the model gets and how much it may write:
 - ``max_tokens``     — the answer's output ceiling
 
 The costs are real and superlinear-ish in combination, which is why ``DEEP`` is
-opt-in: it is roughly 8x a ``BRIEF`` answer per question. ``STANDARD`` (the
-default) and ``DEEP`` both feed the model enough evidence to write a full,
-explanatory answer rather than a terse list — richer prose only stays grounded
-if there is more evidence behind it, so breadth and the output ceiling rise
-together. ``BRIEF`` is left small on purpose: the fast, one-glance summary.
+opt-in. The three tiers are deliberately distinct in *kind*, not just size:
+
+- ``BRIEF``    — the fast, one-glance summary.
+- ``STANDARD`` — a full, well-sectioned explanatory answer (what ``DEEP`` used
+  to be). The everyday default.
+- ``DEEP``     — leave nothing out. Far more evidence, almost no per-chunk
+  truncation, the model's maximum output, and an *exhaustive* synthesis prompt
+  that asks for every concept explained in full rather than a terse list. Cost
+  is not the constraint here; the serving model's output ceiling is.
 """
 
 from __future__ import annotations
@@ -30,12 +34,26 @@ class DepthBudget:
     top_n: int
     evidence_chars: int
     max_tokens: int
+    exhaustive: bool = False  # DEEP: switch the prompt to "explain everything, in full"
 
 
+# STANDARD is what DEEP used to be — a full, well-sectioned answer. DEEP is now the
+# "leave nothing out" tier: it feeds far more evidence with almost no per-chunk
+# truncation, writes to the model's output ceiling, and switches the synthesis
+# prompt to an exhaustive voice (``exhaustive=True``). BRIEF stays the fast summary.
+#
+# The output ceiling is bounded by the serving model, NOT by our willingness to
+# spend: gpt-4o (the current OpenAI synthesis model) caps a completion at 16,384
+# tokens, so 16,000 is the practical maximum here. A single call cannot exceed
+# that — the lever for a genuinely larger answer is the Anthropic gateway
+# (claude-sonnet-5, 128K output, needs streaming) or multi-pass synthesis.
+# ``evidence_chars`` is high enough that real source files are passed whole; the
+# residual truncation guard only trips on pathologically large chunks, so the
+# whole prompt stays inside the model's input window.
 _BUDGETS: dict[Depth, DepthBudget] = {
     Depth.BRIEF: DepthBudget(top_n=4, evidence_chars=1200, max_tokens=800),
-    Depth.STANDARD: DepthBudget(top_n=12, evidence_chars=2800, max_tokens=3500),
-    Depth.DEEP: DepthBudget(top_n=18, evidence_chars=4500, max_tokens=6500),
+    Depth.STANDARD: DepthBudget(top_n=18, evidence_chars=4500, max_tokens=6500),
+    Depth.DEEP: DepthBudget(top_n=24, evidence_chars=10000, max_tokens=16000, exhaustive=True),
 }
 
 

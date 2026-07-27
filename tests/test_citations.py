@@ -28,9 +28,61 @@ def test_all_citations_resolve() -> None:
 
 
 def test_unresolved_citation_fails_closed() -> None:
-    res = resolve_citations("a claim [ghost]", [_hit("id1")])
+    # A citation-shaped marker (hex hash) that resolves to nothing fails closed.
+    res = resolve_citations("a claim [deadbeef]", [_hit("id1")])
     assert not res.ok
-    assert res.unresolved == ["ghost"]
+    assert res.unresolved == ["deadbeef"]
+
+
+def test_bracketed_prose_word_is_not_treated_as_a_citation() -> None:
+    """Regression (gpt-5, 'how does Vectural work'): the answer *described* the
+    citation mechanism and wrote the literal `[chunk_id]`. That plain word is not
+    a citation attempt (no `:` / `/` / hex hash), so it must not fail an answer
+    whose real citations all resolve."""
+    hits = [_hit("svc:f.py:1-3:ef64c105")]
+    res = resolve_citations(
+        "Markers look like [chunk_id]; this claim rests on [ef64c105].", hits
+    )
+    assert res.ok
+    assert res.unresolved == []
+    assert [c.marker for c in res.resolved] == ["ef64c105"]
+
+
+def test_reconstructed_full_id_resolves_on_its_trailing_hash() -> None:
+    """Regression (gpt-5-mini): the model rebuilt the full id from memory with the
+    path/line-range wrong but the distinctive trailing hash right. It must resolve
+    to the retrieved chunk via that hash rather than being refused."""
+    hits = [_hit("vectural:vectural/backend/orchestration/starter.py:1-20:ad1ca595")]
+    # Wrong path (no /backend/) and wrong lines (1-18), correct hash.
+    wrong = "vectural:vectural/orchestration/starter.py:1-18:ad1ca595"
+    res = resolve_citations(f"The starter computes the partition [{wrong}].", hits)
+    assert res.ok
+    assert res.resolved[0].chunk_id == hits[0].chunk_id
+
+
+def test_placeholder_id_resolves_on_its_path_segment() -> None:
+    """Regression (gpt-5-mini): the model cited a real file with a `...` placeholder
+    for the lines/hash (`[vectural:vectural/RUNBOOK.md:...]`). Resolve it to the one
+    retrieved chunk from that file rather than refusing a good answer."""
+    hits = [_hit("vectural:vectural/RUNBOOK.md:1-40:aa11bb22", path="vectural/RUNBOOK.md")]
+    res = resolve_citations("The runbook says so [vectural:vectural/RUNBOOK.md:...].", hits)
+    assert res.ok
+    assert res.resolved[0].chunk_id == hits[0].chunk_id
+
+
+def test_placeholder_id_for_unretrieved_file_still_fails() -> None:
+    # A file that was not retrieved matches nothing → fail closed.
+    hits = [_hit("vectural:vectural/other.py:1-2:aa11bb22", path="vectural/other.py")]
+    res = resolve_citations("claim [vectural:vectural/RUNBOOK.md:...].", hits)
+    assert not res.ok
+
+
+def test_fully_hallucinated_id_still_fails() -> None:
+    # Neither the hash nor the path matches any retrieved chunk → fail closed.
+    hits = [_hit("svc:svc/real.py:1-2:abc123", path="svc/real.py")]
+    res = resolve_citations("claim [svc:svc/ghost.py:9-9:deadbeef].", hits)
+    assert not res.ok
+    assert res.unresolved == ["svc:svc/ghost.py:9-9:deadbeef"]
 
 
 def test_no_citation_fails_closed() -> None:
@@ -41,5 +93,7 @@ def test_no_citation_fails_closed() -> None:
 
 
 def test_partial_resolution_fails() -> None:
-    res = resolve_citations("[id1] good but [ghost] bad", [_hit("id1")])
-    assert not res.ok  # one unresolved -> whole answer withheld
+    # id1 resolves, but the hex-shaped [deadbeef] is a citation attempt that does
+    # not — one unresolved citation withholds the whole answer.
+    res = resolve_citations("[id1] good but [deadbeef] bad", [_hit("id1")])
+    assert not res.ok

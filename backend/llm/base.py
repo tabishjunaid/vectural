@@ -33,6 +33,16 @@ class GatewayRequest(BaseModel):
     # Carried for the client/telemetry; the router set these, not the caller.
     task_type: TaskType
     prompt_version: str
+    # Per-request concrete-model override (the model dropdown). When set, the
+    # client uses this id in place of its ``model``-tier default. The two flags
+    # carry the chosen model's API convention: newer OpenAI models take
+    # ``max_completion_tokens`` instead of ``max_tokens`` and reject a custom
+    # ``temperature``. The router resolves these from the model catalog; the
+    # tiered default path leaves them unset and behaves exactly as before.
+    model_override: str | None = None
+    override_uses_max_completion_tokens: bool = False
+    override_supports_temperature: bool = True
+    override_reasoning_effort: str | None = None
 
 
 class GatewayResult(BaseModel):

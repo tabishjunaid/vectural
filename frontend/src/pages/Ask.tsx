@@ -7,7 +7,9 @@ import { PersonaSelect } from '../components/PersonaSelect';
 import { useCitationDrawer } from '../components/citation';
 import { usePersona } from '../lib/persona';
 import { useDepth } from '../lib/depth';
+import { useModel } from '../lib/model';
 import { DepthSelect } from '../components/DepthSelect';
+import { ModelSelect } from '../components/ModelSelect';
 import { askStream, type AnswerStageEvent, type LiveAnswer } from '../lib/api';
 
 const EXAMPLES = [
@@ -58,8 +60,12 @@ function FollowUps({ questions, onAsk }: { questions: string[]; onAsk: (q: strin
 export function Ask() {
   const { personaId, persona } = usePersona();
   const { depthId } = useDepth();
+  const { modelId } = useModel();
   const { setCitations } = useCitationDrawer();
-  const [question, setQuestion] = useState(EXAMPLES[0]);
+  const [question, setQuestion] = useState('');
+  // Whether the user has asked at least once. Until then the page is a quiet
+  // empty state — nothing is submitted on load (or on a hard refresh).
+  const [asked, setAsked] = useState(false);
   const [answer, setAnswer] = useState<LiveAnswer | null>(null);
   const [stages, setStages] = useState<AnswerStageEvent[]>([]);
   const [loading, setLoading] = useState(false);
@@ -70,6 +76,8 @@ export function Ask() {
     async (q: string) => {
       const trimmed = q.trim();
       if (!trimmed) return;
+      setAsked(true);
+      setQuestion(trimmed);
       setLoading(true);
       setError(null);
       setAnswer(null);
@@ -89,6 +97,7 @@ export function Ask() {
             });
           },
           depthId,
+          modelId ?? undefined,
         );
         setAnswer(result);
         setCitations(result.citations);
@@ -98,12 +107,13 @@ export function Ask() {
         setLoading(false);
       }
     },
-    [personaId, depthId, setCitations],
+    [personaId, depthId, modelId, setCitations],
   );
 
-  // Ask on first load and whenever the persona changes (altitude changes, R6).
+  // Re-ask when the persona changes (altitude changes, R6) — but ONLY once the
+  // user has actually asked something. No auto-submit on first load / hard refresh.
   useEffect(() => {
-    void run(question);
+    if (asked && question.trim()) void run(question);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [personaId]);
 
@@ -150,6 +160,14 @@ export function Ask() {
             ))}
           </div>
 
+          {!asked && (
+            <div className="ask-empty">
+              Ask anything about the codebase — pick an example above or type your
+              own question below to get a cited, verifiable answer.
+            </div>
+          )}
+
+          {asked && (
           <div className="turn">
             <div className="question-bubble">
               <span className="who">You</span>
@@ -212,6 +230,7 @@ export function Ask() {
               </div>
             )}
           </div>
+          )}
         </div>
       </div>
 
@@ -219,6 +238,7 @@ export function Ask() {
         <div className="composer-inner">
           <PersonaSelect />
           <DepthSelect />
+          <ModelSelect />
           <input
             ref={inputRef}
             type="text"

@@ -30,7 +30,7 @@ from backend.graph import StructuralQueries, build_graph
 from backend.graph.builder import GraphBuildResult
 from backend.graph.store import GraphStore
 from backend.llm import LLMRouter
-from backend.llm.factory import build_gateway
+from backend.llm.factory import build_gateways
 from backend.observability import MetricsCollector
 from backend.persistence import InMemoryDeadLetter, InMemoryFileLedger
 from backend.persistence.dead_letter import DeadLetterRepo
@@ -108,10 +108,17 @@ def build_services(
     metrics = MetricsCollector()
     pool = store.quota_pool  # durable shared pool (persisted for real backing)
     accountant = QuotaAccountant(pool)
-    router = LLMRouter(
-        build_gateway(settings if isinstance(settings, Settings) else None),
-        sinks=[accountant, metrics],
+    primary_provider, gateway_clients = build_gateways(
+        settings if isinstance(settings, Settings) else None
     )
+    router = LLMRouter(
+        gateway_clients[primary_provider],
+        clients=gateway_clients,
+        sinks=[accountant, metrics],
+        log_llm=settings.log_llm if isinstance(settings, Settings) else False,
+    )
+    # Which providers a per-question model override can reach — drives GET /models.
+    model_providers = set(gateway_clients)
     governor = QuotaGovernor(pool)
 
     # For real backing these are the durable stores the indexing worker wrote to
@@ -148,6 +155,7 @@ def build_services(
         coverage_service=coverage,
         metrics=metrics,
         cors_origins=cors_origins,
+        model_providers=model_providers,
     )
     return AppServices(app=app, answer=answer, flows=flows, coverage=coverage, metrics=metrics)
 

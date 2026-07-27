@@ -24,6 +24,7 @@ class _Entry:
     commit_sha: str
     persona: Persona
     depth: Depth
+    model: str | None
     answer: Answer
 
 
@@ -34,12 +35,17 @@ class SemanticAnswerCache:
     _entries: list[_Entry] = field(default_factory=list)
 
     def get(
-        self, question: str, commit_sha: str, persona: Persona, depth: Depth = Depth.STANDARD
+        self,
+        question: str,
+        commit_sha: str,
+        persona: Persona,
+        depth: Depth = Depth.STANDARD,
+        model: str | None = None,
     ) -> Answer | None:
-        # Persona changes the answer's altitude (R6) and depth changes how thorough
-        # it is, so both are part of the key. Without depth, asking a question at
-        # `brief` and then at `deep` returns the brief answer from cache — the user
-        # asks for more and silently gets less.
+        # Persona changes the answer's altitude (R6), depth changes how thorough it
+        # is, and the chosen model changes who wrote it — all three are part of the
+        # key. Without model, picking a different model returns the previous model's
+        # answer from cache; without depth, `brief` then `deep` replays the brief one.
         query = self.embedder.embed_one(question)
         best: Answer | None = None
         best_sim = self.threshold
@@ -48,8 +54,9 @@ class SemanticAnswerCache:
                 entry.commit_sha != commit_sha
                 or entry.persona is not persona
                 or entry.depth is not depth
+                or entry.model != model
             ):
-                continue  # stale commit, different persona, or different depth
+                continue  # stale commit, different persona, depth, or model
             sim = cosine(query, entry.embedding)
             if sim >= best_sim:
                 best_sim = sim
@@ -63,9 +70,10 @@ class SemanticAnswerCache:
         persona: Persona,
         answer: Answer,
         depth: Depth = Depth.STANDARD,
+        model: str | None = None,
     ) -> None:
         self._entries.append(
-            _Entry(self.embedder.embed_one(question), commit_sha, persona, depth, answer)
+            _Entry(self.embedder.embed_one(question), commit_sha, persona, depth, model, answer)
         )
 
     def invalidate_commit(self, commit_sha: str) -> None:

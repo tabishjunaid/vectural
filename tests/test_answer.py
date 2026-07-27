@@ -44,6 +44,25 @@ def test_groundedness_gate_fails_closed(answer_env: AnswerEnv) -> None:
     assert answer.likely_services  # names likely owning services
 
 
+def test_groundedness_false_with_no_named_claim_is_not_withheld(answer_env: AnswerEnv) -> None:
+    """Regression: smaller judge models emit a self-contradictory verdict on long
+    answers — `grounded: false` with an EMPTY unsupported_claims list. That is not
+    an actionable grounding failure (the citation gate already verified every
+    claim), so it must not refuse a good answer."""
+    from backend.answer.groundedness import GroundednessResult
+
+    assert GroundednessResult(grounded=False, unsupported_claims=[]).should_withhold is False
+    assert GroundednessResult(grounded=False, unsupported_claims=["x"]).should_withhold is True
+
+    def responder(req):
+        if req.task_type is TaskType.GROUNDEDNESS:
+            return json.dumps({"grounded": False, "unsupported_claims": []})
+        return _default_responder(req)
+
+    answer = _service(answer_env, FakeGatewayClient(responder=responder)).answer(QUESTION)
+    assert answer.mode is AnswerMode.SYNTHESIZED  # rendered, not refused
+
+
 def test_citation_gate_fails_closed(answer_env: AnswerEnv) -> None:
     def responder(req):
         if req.task_type is TaskType.SYNTHESIS:

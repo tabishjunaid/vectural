@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 
 from backend.config import Settings
 from backend.llm.base import GatewayClient
@@ -82,3 +83,49 @@ def build_gateway(settings: Settings | None = None) -> GatewayClient:
     )
     _log.info("LLM gateway = anthropic (%s)", settings.anthropic_base_url or "api.anthropic.com")
     return anthropic_client
+
+
+def _openai_available(settings: Settings) -> bool:
+    return bool(settings.openai_base_url or os.environ.get("OPENAI_API_KEY"))
+
+
+def _anthropic_available(settings: Settings) -> bool:
+    # A mounted `ant` OAuth profile also authenticates, but we cannot detect it
+    # cheaply here, so key/base-url is the conservative signal for "constructable".
+    return bool(settings.anthropic_base_url or os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def build_gateways(settings: Settings | None = None) -> tuple[str, dict[str, GatewayClient]]:
+    """The primary provider plus every *other* provider whose credentials are
+    configured, so the model dropdown can route a per-question override to a
+    second provider without changing the app-wide default.
+
+    Returns ``(primary_provider, {provider: client})``. The primary is always the
+    ``VECTURAL_GATEWAY`` client (via ``build_gateway``); a second provider is added
+    only when its key/base-url is present — otherwise its calls would just fail,
+    so we don't offer its models. ``fake`` yields a single ``{"fake": client}`` and
+    no cross-provider routing (the override is a no-op there).
+    """
+    primary = build_gateway(settings)
+    name = (settings.gateway if settings is not None else "fake").strip().lower()
+    provider = "fake" if name == "fake" else ("anthropic" if name in _ANTHROPIC else "openai")
+    clients: dict[str, GatewayClient] = {provider: primary}
+    if settings is None or name == "fake" or settings.gateway_client:
+        return provider, clients  # no real second provider to add
+
+    from backend.llm.anthropic_client import AnthropicGatewayClient
+    from backend.llm.openai_client import OpenAIGatewayClient
+
+    if "openai" not in clients and _openai_available(settings):
+        clients["openai"] = OpenAIGatewayClient(
+            small_model=settings.openai_small_model or None,
+            large_model=settings.openai_large_model or None,
+            base_url=settings.openai_base_url or None,
+        )
+    if "anthropic" not in clients and _anthropic_available(settings):
+        clients["anthropic"] = AnthropicGatewayClient(
+            haiku_model=settings.anthropic_haiku_model or None,
+            sonnet_model=settings.anthropic_sonnet_model or None,
+            base_url=settings.anthropic_base_url or None,
+        )
+    return provider, clients

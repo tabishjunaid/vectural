@@ -11,6 +11,7 @@ retrieval are the two no-gateway-synthesis short circuits (§5.5, §5.4).
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -38,6 +39,11 @@ from backend.llm.router import LLMRouter
 from backend.retrieval.base import SearchHit
 from backend.retrieval.service import RetrievalService
 from backend.summarise.store import SummaryStore
+
+# Shares the router's LLM-audit logger: when VECTURAL_LOG_LLM is on, refusal
+# diagnostics (which citation/claim tripped a gate) print to stdout alongside the
+# request/response dumps; when off, the logger has no handler and stays silent.
+_audit = logging.getLogger("backend.llm.audit")
 
 
 class FlowEvidenceProvider(Protocol):
@@ -94,20 +100,23 @@ class AnswerService:
         question: str,
         persona: Persona = Persona.ENGINEER,
         depth: Depth = Depth.STANDARD,
+        model: str | None = None,
     ) -> Answer:
         """Answer a question, timing it and recording answer-path metrics (§7.1)."""
         start = time.perf_counter()
-        result = self._compute(question, persona, depth)
+        result = self._compute(question, persona, depth, model)
         if self.metrics is not None:
             self.metrics.record_latency_ms((time.perf_counter() - start) * 1000.0)
             self.metrics.record_answer(result.mode)
         return result
 
-    def _compute(self, question: str, persona: Persona, depth: Depth) -> Answer:
+    def _compute(
+        self, question: str, persona: Persona, depth: Depth, model: str | None = None
+    ) -> Answer:
         """The terminal answer, draining the staged pipeline. The single Answer is
         always the last item :meth:`stream` yields."""
         result: Answer | None = None
-        for item in self.stream(question, persona, depth):
+        for item in self.stream(question, persona, depth, model):
             if isinstance(item, Answer):
                 result = item
         assert result is not None  # the pipeline always yields exactly one Answer
@@ -118,6 +127,7 @@ class AnswerService:
         question: str,
         persona: Persona = Persona.ENGINEER,
         depth: Depth = Depth.STANDARD,
+        model: str | None = None,
     ) -> Iterator[AnswerStage | Answer]:
         """Walk the answer path, emitting an :class:`AnswerStage` as each stage
         starts/finishes and the terminal :class:`Answer` last.
@@ -132,7 +142,7 @@ class AnswerService:
         # Fast path: semantic cache hit — no gateway call at all (§5.5).
         if self.cache is not None:
             yield AnswerStage("cache", "start", "Checking the answer cache")
-            cached = self.cache.get(question, self.commit_sha, persona, depth)
+            cached = self.cache.get(question, self.commit_sha, persona, depth, model)
             if cached is not None:
                 yield AnswerStage("cache", "hit", "Answered from cache — no model call")
                 yield cached.model_copy(
@@ -206,6 +216,8 @@ class AnswerService:
             context_block=context_block,
             evidence_chars=budget.evidence_chars,
             max_tokens=budget.max_tokens,
+            exhaustive=budget.exhaustive,
+            model_override_id=model,
         )
         answer_text = response.text
         yield AnswerStage("synthesize", "ok", "Draft written")
@@ -214,6 +226,10 @@ class AnswerService:
         yield AnswerStage("cite", "start", "Resolving every citation to real evidence")
         resolution = resolve_citations(answer_text, hits)
         if not resolution.ok:
+            _audit.info(
+                "REFUSE cite model=%s unresolved=%r resolved=%d",
+                model, resolution.unresolved, len(resolution.resolved),
+            )
             yield AnswerStage("cite", "fail", "A citation did not resolve — withholding")
             yield Answer.refusal(
                 persona=persona,
@@ -236,11 +252,12 @@ class AnswerService:
             context_block=context_block,
             persona=persona,
         )
-        if not grounded.grounded:
-            # Name the offending claim. The gate already identifies it, and
-            # discarding that left an opaque refusal: identical questions succeed
-            # or fail depending on whether *that* synthesis overreached, with no
-            # way for a reader to tell which claim was the problem.
+        if grounded.should_withhold:
+            # Withhold only when a specific unsupported claim is named (or the
+            # verdict was unparseable) — a bare "not grounded" with no claim named
+            # is a non-actionable, often-spurious verdict from smaller judges and
+            # was refusing good answers. Name the offending claim in the refusal.
+            _audit.info("REFUSE ground model=%s claims=%r", model, grounded.unsupported_claims)
             yield AnswerStage("ground", "fail", "A claim was not supported — withholding")
             yield Answer.refusal(
                 persona=persona,
@@ -266,7 +283,7 @@ class AnswerService:
             return
 
         if self.cache is not None:
-            self.cache.put(question, self.commit_sha, persona, answer, depth)
+            self.cache.put(question, self.commit_sha, persona, answer, depth, model)
         yield answer
 
 

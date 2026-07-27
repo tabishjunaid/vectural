@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     # gateway that issues its own key + URL. Blank → api.openai.com. Swapping between
     # the two is just this URL + the key; no code change.
     openai_base_url: str = Field(default="")
+    # Log every LLM call's full prompt + response to stdout (VECTURAL_LOG_LLM=true).
+    # A debugging aid — verbose (a DEEP synthesis prompt is tens of KB) and prints
+    # prompt/response text, so keep it off in shared/production logs.
+    log_llm: bool = Field(default=False)
 
 
 def load_settings() -> Settings:
