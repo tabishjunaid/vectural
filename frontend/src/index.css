@@ -143,6 +143,23 @@ html, body, #root {
   color: var(--text-faint); font-size: 14px; line-height: 1.55; max-width: 560px;
   margin: 40px auto; text-align: center;
 }
+
+/* Per-query analytics panel (token usage etc.), below the answer / refusal. */
+.analytics-panel { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.analytics-tiles { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+.analytics-tile {
+  flex: 1 1 84px; min-width: 84px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 12px;
+}
+.analytics-tile .num { font-size: 17px; font-weight: 700; color: var(--text); }
+.analytics-tile .label {
+  font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.03em;
+}
+.analytics-pills { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 4px; }
+.badge-neutral { color: var(--text-dim); background: var(--bg); border: 1px solid var(--border); }
+.analytics-breakdown { margin-top: 4px; }
+.analytics-breakdown .drawer-meta-row { padding: 5px 0; }
+.analytics-model { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-dim); }
 .answer-mode-tag {
   display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700;
   color: var(--green); background: #ecf7f0; border: 1px solid #cdeed9; border-radius: 999px;

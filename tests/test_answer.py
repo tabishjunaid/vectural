@@ -44,6 +44,69 @@ def test_groundedness_gate_fails_closed(answer_env: AnswerEnv) -> None:
     assert answer.likely_services  # names likely owning services
 
 
+def test_query_analytics_sums_every_llm_call(answer_env: AnswerEnv) -> None:
+    """A synthesized answer carries per-query analytics whose total equals the sum
+    of every LLM call it made (entity-linking + Cypher + synthesis + groundedness)."""
+    answer = _service(answer_env, FakeGatewayClient()).answer(QUESTION, Persona.ENGINEER)
+    a = answer.analytics
+    assert a is not None
+    assert a.mode == "synthesized" and a.from_cache is False
+    assert a.llm_calls >= 3  # entity_linking, cypher(×1-2), synthesis, groundedness
+    tasks = {c.task for c in a.calls}
+    assert {"entity_linking", "cypher_generation", "synthesis", "groundedness"} <= tasks
+    assert a.total_tokens == sum(c.total_tokens for c in a.calls)
+    assert a.input_tokens == sum(c.input_tokens for c in a.calls)
+    assert a.total_tokens == sum(a.tokens_by_task.values())
+    assert a.evidence_chunks > 0 and a.citations >= 1
+    assert a.latency_ms >= 0.0
+
+
+def test_cache_hit_analytics_reports_zero_tokens(answer_env: AnswerEnv) -> None:
+    cache = SemanticAnswerCache(answer_env.embedder)
+    svc = _service(answer_env, FakeGatewayClient(), cache=cache)
+    svc.answer(QUESTION, Persona.ENGINEER)  # populate the cache
+    second = svc.answer(QUESTION, Persona.ENGINEER)  # served from cache
+    assert second.mode is AnswerMode.INSTANT
+    assert second.analytics is not None
+    assert second.analytics.from_cache is True
+    assert second.analytics.total_tokens == 0 and second.analytics.llm_calls == 0
+
+
+def test_refusal_still_reports_token_spend(answer_env: AnswerEnv) -> None:
+    def responder(req):
+        if req.task_type is TaskType.SYNTHESIS:
+            return "A confident but unverifiable claim. [svc:x.py:1-2:deadbeef]"
+        return _default_responder(req)
+
+    answer = _service(answer_env, FakeGatewayClient(responder=responder)).answer(QUESTION)
+    assert answer.mode is AnswerMode.REFUSAL
+    assert answer.analytics is not None
+    # Planner + synthesis (+ maybe groundedness) all spent tokens before the refusal.
+    assert answer.analytics.total_tokens > 0
+    assert answer.analytics.mode == "refusal"
+
+
+def test_estimate_cost_known_and_unknown_models() -> None:
+    from datetime import UTC, datetime
+
+    from backend.answer.service import _estimate_cost
+    from backend.domain.models import TaskType as TT
+    from backend.llm.base import ModelName, UsageRecord
+
+    def _u(model_id: str) -> UsageRecord:
+        return UsageRecord(
+            task_type=TT.SYNTHESIS, persona=None, model=ModelName.SONNET, model_id=model_id,
+            prompt_version="v", input_tokens=1_000_000, output_tokens=1_000_000,
+            at=datetime.now(UTC),
+        )
+
+    # gpt-4o = (2.50 in, 10.00 out) per 1M → 1M+1M = 12.50
+    assert _estimate_cost([_u("gpt-4o")]) == 12.5
+    # An unknown model price → None (never show a partial/misleading figure).
+    assert _estimate_cost([_u("gpt-4o"), _u("mystery-model")]) is None
+    assert _estimate_cost([]) == 0.0
+
+
 def test_groundedness_false_with_no_named_claim_is_not_withheld(answer_env: AnswerEnv) -> None:
     """Regression: smaller judge models emit a self-contradictory verdict on long
     answers — `grounded: false` with an EMPTY unsupported_claims list. That is not

@@ -10,6 +10,7 @@ import { useDepth } from '../lib/depth';
 import { useModel } from '../lib/model';
 import { DepthSelect } from '../components/DepthSelect';
 import { ModelSelect } from '../components/ModelSelect';
+import { AnalyticsPanel } from '../components/AnalyticsPanel';
 import { askStream, type AnswerStageEvent, type LiveAnswer } from '../lib/api';
 
 const EXAMPLES = [
@@ -215,6 +216,7 @@ export function Ask() {
                   </Link>
                 )}
                 <FollowUps questions={answer.followUps} onAsk={askFollowUp} />
+                <AnalyticsPanel analytics={answer.analytics} />
               </div>
             )}
 
@@ -227,6 +229,7 @@ export function Ask() {
                 <AnswerSections markdown={answer.markdown} />
                 <SourcesRail citationIds={answer.citationIds} persona={personaId} />
                 <FollowUps questions={answer.followUps} onAsk={askFollowUp} />
+                <AnalyticsPanel analytics={answer.analytics} />
               </div>
             )}
           </div>

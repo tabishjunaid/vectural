@@ -37,6 +37,40 @@ class Citation(BaseModel):
     span: Span
 
 
+class LlmCall(BaseModel):
+    """One gateway call made while answering a question (analytics breakdown)."""
+
+    task: str  # entity_linking / cypher_generation / synthesis / groundedness
+    model: str  # the concrete model id the call actually used
+    input_tokens: int
+    output_tokens: int
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+class QueryAnalytics(BaseModel):
+    """Per-query analytics for one /ask — exact token usage plus context. Present
+    on every terminal state (a refusal still spends tokens; a cache hit spends 0)."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    llm_calls: int = 0
+    calls: list[LlmCall] = Field(default_factory=list)
+    tokens_by_task: dict[str, int] = Field(default_factory=dict)
+    latency_ms: float = 0.0
+    model: str | None = None  # the synthesis model this query used (concrete id)
+    depth: str = ""
+    persona: str = ""
+    mode: str = ""
+    from_cache: bool = False
+    citations: int = 0
+    evidence_chunks: int = 0
+    cost_usd: float | None = None  # best-effort estimate; None if a price is unknown
+
+
 class Answer(BaseModel):
     mode: AnswerMode
     persona: Persona
@@ -52,6 +86,8 @@ class Answer(BaseModel):
     # Grounded questions to explore next (§5.5 drill-down). Present on refusals
     # too — that is where a reader most needs to know what they *can* ask.
     follow_ups: list[str] = Field(default_factory=list)
+    # Per-query token usage + context, attached by the answer path before serving.
+    analytics: QueryAnalytics | None = None
 
     @classmethod
     def synthesized(

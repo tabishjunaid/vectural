@@ -52,6 +52,11 @@ class GatewayResult(BaseModel):
     text: str
     input_tokens: int
     output_tokens: int
+    # The concrete model id the client actually called (e.g. "gpt-4o-mini",
+    # "gpt-5", "claude-sonnet-5"). The router only knows the logical tier, so the
+    # client — which resolves the concrete id — reports it here for per-call
+    # analytics and cost. Blank on clients that don't set it (e.g. the fake).
+    model: str = ""
 
 
 class UsageRecord(BaseModel):
@@ -61,6 +66,9 @@ class UsageRecord(BaseModel):
     task_type: TaskType
     persona: Persona | None
     model: ModelName
+    # The concrete model id (from GatewayResult), e.g. "gpt-4o"; blank if unknown.
+    # `model` stays the logical tier so the shared quota counter is unaffected.
+    model_id: str = ""
     prompt_version: str
     input_tokens: int
     output_tokens: int

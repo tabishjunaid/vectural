@@ -36,6 +36,31 @@ interface BackendCitation {
   span: { start: number; end: number };
 }
 
+interface BackendLlmCall {
+  task: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+interface BackendAnalytics {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  llm_calls: number;
+  calls: BackendLlmCall[];
+  tokens_by_task: Record<string, number>;
+  latency_ms: number;
+  model: string | null;
+  depth: string;
+  persona: string;
+  mode: string;
+  from_cache: boolean;
+  citations: number;
+  evidence_chunks: number;
+  cost_usd: number | null;
+}
+
 interface BackendAnswer {
   mode: 'synthesized' | 'instant' | 'refusal';
   persona: PersonaId;
@@ -47,6 +72,7 @@ interface BackendAnswer {
   from_cache: boolean;
   stale: boolean;
   follow_ups: string[];
+  analytics: BackendAnalytics | null;
 }
 
 interface BackendFlow {
@@ -63,6 +89,31 @@ interface BackendFlow {
 
 // ---- rendered shapes the UI consumes --------------------------------------
 
+export interface LlmCallStat {
+  task: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface LiveAnalytics {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  llmCalls: number;
+  calls: LlmCallStat[];
+  tokensByTask: Record<string, number>;
+  latencyMs: number;
+  model: string | null;
+  depth: string;
+  persona: string;
+  mode: string;
+  fromCache: boolean;
+  citations: number;
+  evidenceChunks: number;
+  costUsd: number | null;
+}
+
 export interface LiveAnswer {
   mode: 'synthesized' | 'instant' | 'refusal';
   question: string;
@@ -75,6 +126,33 @@ export interface LiveAnswer {
   fromCache: boolean;
   stale: boolean;
   followUps: string[]; // grounded questions to explore next
+  analytics: LiveAnalytics | null; // per-query token usage + context
+}
+
+function adaptAnalytics(a: BackendAnalytics | null | undefined): LiveAnalytics | null {
+  if (!a) return null;
+  return {
+    inputTokens: a.input_tokens,
+    outputTokens: a.output_tokens,
+    totalTokens: a.total_tokens,
+    llmCalls: a.llm_calls,
+    calls: (a.calls ?? []).map((c) => ({
+      task: c.task,
+      model: c.model,
+      inputTokens: c.input_tokens,
+      outputTokens: c.output_tokens,
+    })),
+    tokensByTask: a.tokens_by_task ?? {},
+    latencyMs: a.latency_ms,
+    model: a.model,
+    depth: a.depth,
+    persona: a.persona,
+    mode: a.mode,
+    fromCache: a.from_cache,
+    citations: a.citations,
+    evidenceChunks: a.evidence_chunks,
+    costUsd: a.cost_usd,
+  };
 }
 
 function basename(path: string): string {
@@ -125,6 +203,7 @@ function adaptAnswer(a: BackendAnswer): LiveAnswer {
     fromCache: a.from_cache,
     stale: a.stale,
     followUps: a.follow_ups ?? [],
+    analytics: adaptAnalytics(a.analytics),
   };
 }
 

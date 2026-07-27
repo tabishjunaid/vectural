@@ -108,6 +108,7 @@ class LLMRouter:
             task_type=task_type,
             persona=persona,
             model=request.model,
+            model_id=result.model,  # the concrete model the client actually called
             prompt_version=prompt_version,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,

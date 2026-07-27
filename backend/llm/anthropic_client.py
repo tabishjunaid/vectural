@@ -114,6 +114,7 @@ class AnthropicGatewayClient:
             text=text,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            model=request.model_override or self._models[request.model],
         )
 
 

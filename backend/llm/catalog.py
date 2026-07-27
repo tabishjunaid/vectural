@@ -90,3 +90,22 @@ def available_models(providers: set[str]) -> list[SelectableModel]:
     """Catalog entries whose provider is actually constructable, so the dropdown
     never offers a model whose gateway isn't wired (its calls would just fail)."""
     return [m for m in SELECTABLE_MODELS if m.provider in providers]
+
+
+# Per-1M-token prices (USD) keyed by concrete model id, for the per-query cost
+# ESTIMATE shown in the analytics panel. Editable and best-effort — prices change
+# and depend on the account; tokens are exact, the dollar figure is a guide.
+# (input_per_1m, output_per_1m). Covers the selectable models + the default tiers.
+PRICES: dict[str, tuple[float, float]] = {
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-5": (1.25, 10.00),
+    "gpt-5-mini": (0.25, 2.00),
+    "claude-sonnet-5": (3.00, 15.00),
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+}
+
+
+def price_of(model_id: str) -> tuple[float, float] | None:
+    return PRICES.get(model_id)

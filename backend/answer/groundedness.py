@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from backend.answer.citations import strip_fenced_blocks
 from backend.domain.models import Persona, TaskType
+from backend.llm.base import UsageRecord
 from backend.llm.router import LLMRouter
 from backend.retrieval.base import SearchHit
 
@@ -22,6 +23,9 @@ GROUNDEDNESS_PROMPT_VERSION = "grounded-v1"
 class GroundednessResult(BaseModel):
     grounded: bool
     unsupported_claims: list[str] = Field(default_factory=list)
+    # Token usage for this gate's own LLM call — set by check_groundedness after
+    # parsing, not part of the judged JSON. Exposed for per-query analytics.
+    usage: UsageRecord | None = Field(default=None, exclude=True)
 
     @property
     def should_withhold(self) -> bool:
@@ -64,9 +68,11 @@ def check_groundedness(
     prompt = _render_prompt(answer_text, chunks, context_block)
     response = router.route(TaskType.GROUNDEDNESS, prompt_version, {"prompt": prompt}, persona)
     try:
-        return GroundednessResult.model_validate(response.parsed or {})
+        result = GroundednessResult.model_validate(response.parsed or {})
     except (ValueError, TypeError):
-        return GroundednessResult(grounded=False, unsupported_claims=["unparseable verdict"])
+        result = GroundednessResult(grounded=False, unsupported_claims=["unparseable verdict"])
+    result.usage = response.usage
+    return result
 
 
 def _render_prompt(answer_text: str, chunks: list[SearchHit], context_block: str = "") -> str:

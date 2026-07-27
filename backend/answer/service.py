@@ -30,11 +30,13 @@ from backend.answer.context import (
 from backend.answer.depth import budget_for
 from backend.answer.followups import suggest_followups
 from backend.answer.groundedness import check_groundedness
-from backend.answer.models import Answer, AnswerMode
+from backend.answer.models import Answer, AnswerMode, LlmCall, QueryAnalytics
 from backend.answer.plan import RetrievalPlanner
 from backend.answer.synthesis import synthesise
 from backend.domain.models import Depth, Persona
 from backend.freshness.state import FreshnessState
+from backend.llm import catalog
+from backend.llm.base import UsageRecord
 from backend.llm.router import LLMRouter
 from backend.retrieval.base import SearchHit
 from backend.retrieval.service import RetrievalService
@@ -139,6 +141,12 @@ class AnswerService:
         the slow gateway calls (synthesis, groundedness) are in flight instead of
         a single opaque "thinking…".
         """
+        t0 = time.perf_counter()
+        usage: list[UsageRecord] = []  # every gateway call this query makes
+
+        def elapsed_ms() -> float:
+            return (time.perf_counter() - t0) * 1000.0
+
         # Fast path: semantic cache hit — no gateway call at all (§5.5).
         if self.cache is not None:
             yield AnswerStage("cache", "start", "Checking the answer cache")
@@ -150,6 +158,11 @@ class AnswerService:
                         "mode": AnswerMode.INSTANT,
                         "from_cache": True,
                         "reason": "semantic cache hit",
+                        "analytics": _build_analytics(
+                            [], latency_ms=elapsed_ms(), model=model, depth=depth,
+                            persona=persona, mode="instant", from_cache=True,
+                            citations=len(cached.citations), evidence_chunks=0,
+                        ),
                     }
                 )
                 return
@@ -157,6 +170,7 @@ class AnswerService:
 
         yield AnswerStage("plan", "start", "Planning which services to search")
         plan = self.planner.plan(question, persona)
+        usage.extend(plan.usage)  # entity-linking + 1-2 Cypher calls
         scope_label = ", ".join(sorted(plan.scope)) if plan.scope else "the whole estate"
         yield AnswerStage("plan", "ok", f"Scope: {scope_label}")
 
@@ -184,6 +198,14 @@ class AnswerService:
                 follow_ups=suggest_followups(
                     AnswerContext(), [], question, likely_services=plan.anchors
                 ),
+            ).model_copy(
+                update={
+                    "analytics": _build_analytics(
+                        usage, latency_ms=elapsed_ms(), model=model, depth=depth,
+                        persona=persona, mode="refusal", from_cache=False,
+                        citations=0, evidence_chunks=0,
+                    )
+                }
             )
             return
         yield AnswerStage("retrieve", "ok", f"Found {len(hits)} passages of evidence")
@@ -219,6 +241,7 @@ class AnswerService:
             exhaustive=budget.exhaustive,
             model_override_id=model,
         )
+        usage.append(response.usage)
         answer_text = response.text
         yield AnswerStage("synthesize", "ok", "Draft written")
 
@@ -237,6 +260,14 @@ class AnswerService:
                 reason="citation could not be resolved to retrieved evidence",
                 likely_services=_likely(plan.anchors, hits),
                 follow_ups=follow_ups,
+            ).model_copy(
+                update={
+                    "analytics": _build_analytics(
+                        usage, latency_ms=elapsed_ms(), model=model, depth=depth,
+                        persona=persona, mode="refusal", from_cache=False,
+                        citations=len(resolution.resolved), evidence_chunks=len(hits),
+                    )
+                }
             )
             return
         yield AnswerStage("cite", "ok", f"{len(resolution.resolved)} citations resolved")
@@ -252,6 +283,8 @@ class AnswerService:
             context_block=context_block,
             persona=persona,
         )
+        if grounded.usage is not None:
+            usage.append(grounded.usage)
         if grounded.should_withhold:
             # Withhold only when a specific unsupported claim is named (or the
             # verdict was unparseable) — a bare "not grounded" with no claim named
@@ -265,6 +298,14 @@ class AnswerService:
                 reason=_ungrounded_reason(grounded.unsupported_claims),
                 likely_services=_likely(plan.anchors, hits),
                 follow_ups=follow_ups,
+            ).model_copy(
+                update={
+                    "analytics": _build_analytics(
+                        usage, latency_ms=elapsed_ms(), model=model, depth=depth,
+                        persona=persona, mode="refusal", from_cache=False,
+                        citations=len(resolution.resolved), evidence_chunks=len(hits),
+                    )
+                }
             )
             return
         yield AnswerStage("ground", "ok", "All claims grounded")
@@ -275,6 +316,14 @@ class AnswerService:
             text=answer_text,
             citations=resolution.resolved,
             follow_ups=suggest_followups(ctx, resolution.resolved, question),
+        ).model_copy(
+            update={
+                "analytics": _build_analytics(
+                    usage, latency_ms=elapsed_ms(), model=model, depth=depth,
+                    persona=persona, mode="synthesized", from_cache=False,
+                    citations=len(resolution.resolved), evidence_chunks=len(hits),
+                )
+            }
         )
         # Visible staleness: if a contributing service is mid-reindex, serve the
         # answer but flag it (§4.4). Stale answers are not cached.
@@ -285,6 +334,67 @@ class AnswerService:
         if self.cache is not None:
             self.cache.put(question, self.commit_sha, persona, answer, depth, model)
         yield answer
+
+
+def _estimate_cost(usage: list[UsageRecord]) -> float | None:
+    """Best-effort USD estimate for the query's token spend. None if any call's
+    concrete model has no price (so we never show a misleadingly-partial figure)."""
+    total = 0.0
+    for u in usage:
+        price = catalog.price_of(u.model_id)
+        if price is None:
+            return None
+        price_in, price_out = price
+        total += u.input_tokens / 1e6 * price_in + u.output_tokens / 1e6 * price_out
+    return round(total, 6)
+
+
+def _build_analytics(
+    usage: list[UsageRecord],
+    *,
+    latency_ms: float,
+    model: str | None,
+    depth: Depth,
+    persona: Persona,
+    mode: str,
+    from_cache: bool,
+    citations: int,
+    evidence_chunks: int,
+) -> QueryAnalytics:
+    """Assemble the per-query analytics from the UsageRecords collected this query."""
+    calls = [
+        LlmCall(
+            task=u.task_type.value,
+            model=u.model_id or u.model.value,
+            input_tokens=u.input_tokens,
+            output_tokens=u.output_tokens,
+        )
+        for u in usage
+    ]
+    by_task: dict[str, int] = {}
+    for u in usage:
+        by_task[u.task_type.value] = by_task.get(u.task_type.value, 0) + u.total_tokens
+    inp = sum(u.input_tokens for u in usage)
+    out = sum(u.output_tokens for u in usage)
+    # Prefer the concrete model the synthesis call actually used for the headline.
+    synth_model = next((c.model for c in calls if c.task == "synthesis"), model)
+    return QueryAnalytics(
+        input_tokens=inp,
+        output_tokens=out,
+        total_tokens=inp + out,
+        llm_calls=len(calls),
+        calls=calls,
+        tokens_by_task=by_task,
+        latency_ms=round(latency_ms, 1),
+        model=synth_model,
+        depth=depth.value,
+        persona=persona.value,
+        mode=mode,
+        from_cache=from_cache,
+        citations=citations,
+        evidence_chunks=evidence_chunks,
+        cost_usd=_estimate_cost(usage),
+    )
 
 
 _UNGROUNDED = "a claim was not grounded in the retrieved evidence"
