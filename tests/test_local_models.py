@@ -36,12 +36,20 @@ def test_discover_parses_v1_models(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeResp:
         def raise_for_status(self) -> None: ...
         def json(self) -> dict:
-            return {"data": [{"id": "qwen2.5-coder:7b"}, {"id": "llama3.1:8b"}]}
+            # Includes an embedding model, which must be filtered out (can't chat).
+            return {
+                "data": [
+                    {"id": "qwen2.5-coder:7b"},
+                    {"id": "llama3.1:8b"},
+                    {"id": "nomic-embed-text:latest"},
+                ]
+            }
 
     import httpx
 
     monkeypatch.setattr(httpx, "get", lambda url, timeout=None: FakeResp())
     models = discover_ollama_models("http://host:11434/v1")
+    # nomic-embed-text is dropped — embedding models can't do synthesis.
     assert {m.id for m in models} == {"qwen2.5-coder:7b", "llama3.1:8b"}
     assert all(m.provider == "ollama" and m.supports_temperature for m in models)
     assert all(not m.uses_max_completion_tokens for m in models)
@@ -127,6 +135,19 @@ def test_override_reaches_groundedness(answer_env: AnswerEnv) -> None:
 
 
 # ---- factory registration -------------------------------------------------
+
+
+def test_groundedness_gate_falls_back_for_reasoning_models() -> None:
+    """A reasoning-model pick (gpt-5 family) must route the groundedness gate to the
+    calibrated default judge — reasoning models over-refuse as self-judges. Every
+    other pick (incl. local) keeps the picked model, so local stays $0/local."""
+    from backend.answer.service import _gate_override
+
+    assert _gate_override("gpt-5") is None
+    assert _gate_override("gpt-5-mini") is None
+    assert _gate_override("gpt-4o") == "gpt-4o"  # normal model judges itself
+    assert _gate_override("qwen2.5-coder:32b") == "qwen2.5-coder:32b"  # local stays local
+    assert _gate_override(None) is None  # no override → default judge
 
 
 def test_ollama_available_flag() -> None:

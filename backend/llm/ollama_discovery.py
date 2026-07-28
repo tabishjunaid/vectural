@@ -46,6 +46,11 @@ def discover_ollama_models(
         model_id = entry.get("id")
         if not model_id:
             continue
+        # Skip embedding models — they can't do chat/synthesis, so offering them in
+        # the answer-model dropdown would only produce errors. Embedding models
+        # universally carry "embed" in their name (nomic-embed-text, mxbai-embed…).
+        if "embed" in model_id.lower():
+            continue
         models.append(
             SelectableModel(
                 id=model_id,

@@ -123,7 +123,7 @@ export function Compare() {
   return (
     <AppShell title="Compare" activeNav="compare">
       <div className="main-scroll">
-        <div className="main-inner">
+        <div className="main-inner main-inner-wide">
           <p className="compare-intro">
             Run one question through two models at once — same evidence, same depth and
             persona. Compare a local Ollama model (zero cost, nothing leaves the machine)

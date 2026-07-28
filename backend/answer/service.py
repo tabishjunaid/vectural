@@ -298,7 +298,9 @@ class AnswerService:
             context_block=context_block,
             evidence_chars=budget.evidence_chars,
             persona=persona,
-            model_override_id=model,
+            # Reasoning models are over-strict self-judges — keep the gate on the
+            # calibrated default judge for them (see _gate_override).
+            model_override_id=_gate_override(model),
         )
         if grounded.usage is not None:
             usage.append(grounded.usage)
@@ -353,6 +355,23 @@ class AnswerService:
         if self.cache is not None:
             self.cache.put(question, self.commit_sha, persona, answer, depth, model)
         yield answer
+
+
+def _gate_override(model: str | None) -> str | None:
+    """The model the groundedness (R1) gate should run on for a given pick.
+
+    A reasoning model (the gpt-5 family) is a miscalibrated groundedness judge: it
+    over-reasons and flags its own legitimate inferential claims — the ones that
+    combine several sources — refusing sound answers even though the gate prompt
+    says not to. So for a reasoning-model pick the verifier falls back to the
+    calibrated default judge (``None`` → the primary gateway's cheap tier). Every
+    other pick keeps the picked model — crucially, LOCAL models still judge locally,
+    so a local pick stays $0 and never leaves the machine. R1 stays fail-closed
+    either way; only *which* model verifies changes."""
+    entry = catalog.find(model)
+    if entry is not None and entry.reasoning_effort is not None:
+        return None
+    return model
 
 
 def _estimate_cost(usage: list[UsageRecord]) -> float | None:
