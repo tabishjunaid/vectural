@@ -48,6 +48,25 @@ def test_bracketed_prose_word_is_not_treated_as_a_citation() -> None:
     assert [c.marker for c in res.resolved] == ["ef64c105"]
 
 
+def test_bracketed_prose_with_a_colon_is_not_a_citation() -> None:
+    """Regression (gpt-5 at DEEP): the model uses square brackets for prose
+    emphasis/labels — `[finalize: upsert shared nodes + cross-service edges]`,
+    `[(Postgres: file_ledger, quota, etc.)]`. Those contain a colon but are NOT
+    citations (a chunk_id/hash never contains whitespace). They must not fail an
+    answer whose real hash citations all resolve — else a verbose model that cites
+    21 chunks correctly is refused over two bracketed phrases."""
+    hits = [_hit("svc:f.py:1-3:b55297ee")]
+    text = (
+        "The worker runs [finalize: upsert shared nodes + cross-service edges; "
+        "generate flows] and writes ledgers [(Postgres: file_ledger, quota, etc.)]. "
+        "This is grounded in [b55297ee]."
+    )
+    res = resolve_citations(text, hits)
+    assert res.ok
+    assert res.unresolved == []
+    assert [c.marker for c in res.resolved] == ["b55297ee"]
+
+
 def test_reconstructed_full_id_resolves_on_its_trailing_hash() -> None:
     """Regression (gpt-5-mini): the model rebuilt the full id from memory with the
     path/line-range wrong but the distinctive trailing hash right. It must resolve

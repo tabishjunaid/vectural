@@ -71,7 +71,17 @@ def _looks_like_citation(marker: str) -> bool:
     neither. Only *attempts* that fail to resolve fail the gate — this never lets
     an id/path/hash-shaped hallucination through, and the groundedness gate still
     runs. A chunk_id fragment carries a ``:`` (full id) or ``/`` (a path/module
-    key) or is the bare hex hash; a plain word carries none of those."""
+    key) or is the bare hex hash; a plain word carries none of those.
+
+    A chunk_id and its hash never contain WHITESPACE — but bracketed prose does.
+    Verbose models (gpt-5 at DEEP) write emphasis/labels in brackets like
+    ``[finalize: upsert shared nodes + cross-service edges]`` or
+    ``[(Postgres: file_ledger, quota, etc.)]``; the colon there is punctuation, not
+    a citation, so a marker containing whitespace is never a citation attempt. This
+    stays fail-closed for real ids (a fabricated ``svc:path:1-2:hash`` has no
+    spaces and is still caught)."""
+    if any(ch.isspace() for ch in marker):
+        return False
     return ":" in marker or "/" in marker or bool(_HASHLIKE.fullmatch(marker))
 
 
