@@ -51,7 +51,7 @@ def test_query_analytics_sums_every_llm_call(answer_env: AnswerEnv) -> None:
     a = answer.analytics
     assert a is not None
     assert a.mode == "synthesized" and a.from_cache is False
-    assert a.llm_calls >= 3  # entity_linking, cypher(×1-2), synthesis, groundedness
+    assert a.llm_calls >= 3  # entity_linking, cypher(x1-2), synthesis, groundedness
     tasks = {c.task for c in a.calls}
     assert {"entity_linking", "cypher_generation", "synthesis", "groundedness"} <= tasks
     assert a.total_tokens == sum(c.total_tokens for c in a.calls)

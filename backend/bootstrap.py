@@ -119,6 +119,16 @@ def build_services(
     )
     # Which providers a per-question model override can reach — drives GET /models.
     model_providers = set(gateway_clients)
+    # If a local Ollama server is wired, ask it which models are actually pulled on
+    # this machine and register them so they appear in the dropdown (and resolve for
+    # the override). Best-effort: a down server just contributes nothing.
+    if "ollama" in gateway_clients and isinstance(settings, Settings):
+        from backend.llm import catalog
+        from backend.llm.ollama_discovery import discover_ollama_models
+
+        catalog.register_dynamic_models(
+            discover_ollama_models(settings.ollama_base_url, max_output=settings.ollama_max_output)
+        )
     governor = QuotaGovernor(pool)
 
     # For real backing these are the durable stores the indexing worker wrote to

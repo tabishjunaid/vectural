@@ -68,6 +68,10 @@ class QueryAnalytics(BaseModel):
     from_cache: bool = False
     citations: int = 0
     evidence_chunks: int = 0
+    # Inferred question complexity (simple/moderate/complex) — how much of the
+    # depth budget the question warranted. None on the pre-plan exits (cache hit,
+    # empty retrieval) where it is not yet assessed.
+    complexity: str | None = None
     cost_usd: float | None = None  # best-effort estimate; None if a price is unknown
 
 

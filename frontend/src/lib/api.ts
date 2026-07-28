@@ -58,6 +58,7 @@ interface BackendAnalytics {
   from_cache: boolean;
   citations: number;
   evidence_chunks: number;
+  complexity: string | null;
   cost_usd: number | null;
 }
 
@@ -111,6 +112,7 @@ export interface LiveAnalytics {
   fromCache: boolean;
   citations: number;
   evidenceChunks: number;
+  complexity: string | null;
   costUsd: number | null;
 }
 
@@ -151,6 +153,7 @@ function adaptAnalytics(a: BackendAnalytics | null | undefined): LiveAnalytics |
     fromCache: a.from_cache,
     citations: a.citations,
     evidenceChunks: a.evidence_chunks,
+    complexity: a.complexity ?? null,
     costUsd: a.cost_usd,
   };
 }

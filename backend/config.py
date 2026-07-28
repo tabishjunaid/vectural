@@ -98,6 +98,17 @@ class Settings(BaseSettings):
     # gateway that issues its own key + URL. Blank → api.openai.com. Swapping between
     # the two is just this URL + the key; no code change.
     openai_base_url: str = Field(default="")
+    # Ollama (local, OpenAI-compatible) — a zero-cost, fully-local model provider.
+    # Set the base URL to enable it; from a Docker container Ollama runs on the
+    # host, so use http://host.docker.internal:11434/v1. The models are then
+    # auto-discovered from Ollama's /v1/models and appear in the dropdown. The key
+    # is a dummy (Ollama ignores it, but the OpenAI SDK requires a non-empty one).
+    ollama_base_url: str = Field(default="")
+    ollama_api_key: str = Field(default="ollama")
+    ollama_max_output: int = Field(default=8192)  # completion ceiling for local models
+    # Tiers used only when Ollama is the *primary* gateway (VECTURAL_GATEWAY=ollama).
+    ollama_small_model: str = Field(default="")
+    ollama_large_model: str = Field(default="")
     # Log every LLM call's full prompt + response to stdout (VECTURAL_LOG_LLM=true).
     # A debugging aid — verbose (a DEEP synthesis prompt is tens of KB) and prints
     # prompt/response text, so keep it off in shared/production logs.

@@ -12,6 +12,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from backend.answer.citations import strip_fenced_blocks
+from backend.answer.synthesis import EVIDENCE_CHARS_PER_CHUNK, _evidence_body
 from backend.domain.models import Persona, TaskType
 from backend.llm.base import UsageRecord
 from backend.llm.router import LLMRouter
@@ -49,10 +50,19 @@ def check_groundedness(
     answer_text: str,
     chunks: list[SearchHit],
     context_block: str = "",
+    evidence_chars: int = EVIDENCE_CHARS_PER_CHUNK,
     persona: Persona | None = None,
+    model_override_id: str | None = None,
     prompt_version: str = GROUNDEDNESS_PROMPT_VERSION,
 ) -> GroundednessResult:
     """Route a claim-by-claim groundedness check and parse the verdict.
+
+    ``chunks`` should be the chunks the answer actually *cited* (the caller scopes
+    the full retrieved set down to the cited subset), and ``evidence_chars`` the
+    same per-chunk truncation budget synthesis used. The gate then judges against
+    exactly the material that produced the answer — not twenty unrelated retrieved
+    chunks at full length — which is both cheaper and more accurate: extra evidence
+    the answer never leaned on only adds cost and spurious "unsupported" noise.
 
     ``context_block`` must be the *same* architectural context synthesis was given.
     The gate has to judge against the material the model actually saw: when
@@ -65,8 +75,13 @@ def check_groundedness(
 
     A malformed verdict is treated conservatively as *not grounded* — the gate
     fails closed even on its own uncertainty."""
-    prompt = _render_prompt(answer_text, chunks, context_block)
-    response = router.route(TaskType.GROUNDEDNESS, prompt_version, {"prompt": prompt}, persona)
+    prompt = _render_prompt(answer_text, chunks, context_block, evidence_chars)
+    response = router.route(
+        TaskType.GROUNDEDNESS,
+        prompt_version,
+        {"prompt": prompt, "model_override_id": model_override_id},
+        persona,
+    )
     try:
         result = GroundednessResult.model_validate(response.parsed or {})
     except (ValueError, TypeError):
@@ -75,8 +90,20 @@ def check_groundedness(
     return result
 
 
-def _render_prompt(answer_text: str, chunks: list[SearchHit], context_block: str = "") -> str:
-    evidence = "\n".join(f"- [{c.chunk_id}] {c.path}:{c.span}\n{c.content}" for c in chunks)
+def _render_prompt(
+    answer_text: str,
+    chunks: list[SearchHit],
+    context_block: str = "",
+    evidence_chars: int = EVIDENCE_CHARS_PER_CHUNK,
+) -> str:
+    # Truncate each chunk to the same budget synthesis used (via the shared
+    # _evidence_body helper) — the judge should see exactly what the model saw, no
+    # more. Previously this emitted the full untruncated content of every chunk,
+    # so the gate's prompt could dwarf synthesis's own.
+    evidence = "\n".join(
+        f"- [{c.chunk_id}] {c.path}:{c.span}\n{_evidence_body(c.content, limit=evidence_chars)}"
+        for c in chunks
+    )
     context = (
         f"\n# ARCHITECTURAL CONTEXT (also supports claims)\n{context_block}\n"
         if context_block

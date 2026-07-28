@@ -49,6 +49,7 @@ export function AnalyticsPanel({ analytics }: { analytics: LiveAnalytics | null 
         {a.fromCache && <span className="status-pill indexed">Served from cache · 0 tokens</span>}
         {a.model && <span className="badge-mini badge-current">{a.model}</span>}
         <span className="badge-mini badge-neutral">{a.depth}</span>
+        {a.complexity && <span className="badge-mini badge-neutral">{a.complexity}</span>}
         <span className="badge-mini badge-neutral">{a.persona}</span>
         <span className="badge-mini badge-neutral">{a.mode}</span>
         <span className="badge-mini badge-neutral">{a.evidenceChunks} chunks</span>

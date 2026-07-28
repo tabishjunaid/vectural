@@ -53,6 +53,8 @@ class SelectableModel:
 
     @property
     def hint(self) -> str:
+        if self.provider == "ollama":
+            return "Ollama · local · free"
         vendor = "OpenAI" if self.provider == "openai" else "Anthropic"
         return f"{vendor} · up to {self.max_output // 1000}K out"
 
@@ -80,6 +82,25 @@ SELECTABLE_MODELS: list[SelectableModel] = [
 
 _BY_ID: dict[str, SelectableModel] = {m.id: m for m in SELECTABLE_MODELS}
 
+# Models discovered at runtime (local Ollama models pulled on this machine),
+# registered by bootstrap. Kept separate from the static SELECTABLE_MODELS so the
+# curated list stays a reviewable constant while the local set adapts per host.
+_DYNAMIC: list[SelectableModel] = []
+
+
+def register_dynamic_models(models: list[SelectableModel]) -> None:
+    """Add runtime-discovered models (e.g. local Ollama) to the catalog, so both
+    ``find`` (router override resolution) and ``available_models`` (the dropdown)
+    see them. Idempotent per id; a re-register replaces the prior entry."""
+    for m in models:
+        _DYNAMIC[:] = [d for d in _DYNAMIC if d.id != m.id]
+        _DYNAMIC.append(m)
+        _BY_ID[m.id] = m
+
+
+def _all_models() -> list[SelectableModel]:
+    return SELECTABLE_MODELS + _DYNAMIC
+
 
 def find(model_id: str | None) -> SelectableModel | None:
     """The catalog entry for a UI model id, or None (unknown / no override)."""
@@ -89,7 +110,7 @@ def find(model_id: str | None) -> SelectableModel | None:
 def available_models(providers: set[str]) -> list[SelectableModel]:
     """Catalog entries whose provider is actually constructable, so the dropdown
     never offers a model whose gateway isn't wired (its calls would just fail)."""
-    return [m for m in SELECTABLE_MODELS if m.provider in providers]
+    return [m for m in _all_models() if m.provider in providers]
 
 
 # Per-1M-token prices (USD) keyed by concrete model id, for the per-query cost
@@ -108,4 +129,12 @@ PRICES: dict[str, tuple[float, float]] = {
 
 
 def price_of(model_id: str) -> tuple[float, float] | None:
-    return PRICES.get(model_id)
+    priced = PRICES.get(model_id)
+    if priced is not None:
+        return priced
+    # Local models cost nothing to run — report $0 (not "unknown") so the analytics
+    # cost tile shows $0.00, which is the whole point of the OpenAI-vs-local compare.
+    entry = _BY_ID.get(model_id)
+    if entry is not None and entry.provider == "ollama":
+        return (0.0, 0.0)
+    return None

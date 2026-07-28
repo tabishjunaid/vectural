@@ -47,6 +47,7 @@ class OpenAIGatewayClient:
         small_model: str | None = None,
         large_model: str | None = None,
         base_url: str | None = None,
+        api_key: str | None = None,
         client: Any | None = None,
     ) -> None:
         self._models: dict[ModelName, str] = {
@@ -54,16 +55,20 @@ class OpenAIGatewayClient:
             ModelName.SONNET: large_model or _DEFAULT_MODELS[ModelName.SONNET],
         }
         # Lazy import so the base install never needs the SDK. The SDK reads
-        # OPENAI_API_KEY (and OPENAI_BASE_URL) from the environment — we pass no key.
-        # An explicit base_url points the same client at an OpenAI-compatible
-        # enterprise gateway instead of api.openai.com.
+        # OPENAI_API_KEY (and OPENAI_BASE_URL) from the environment by default. An
+        # explicit base_url points the same client at any OpenAI-compatible endpoint
+        # (a company AI gateway, or a local Ollama server); an explicit api_key lets
+        # a pure-local machine authenticate that endpoint with a dummy key it
+        # ignores, without an OPENAI_API_KEY in the environment.
         self._client: OpenAI
         if client is not None:
             self._client = client
         else:
             import openai
 
-            self._client = openai.OpenAI(base_url=base_url) if base_url else openai.OpenAI()
+            # Passing None for either falls back to the SDK's env-based default
+            # (OPENAI_API_KEY, api.openai.com), preserving prior behaviour.
+            self._client = openai.OpenAI(base_url=base_url or None, api_key=api_key or None)
 
     def complete(self, request: GatewayRequest) -> GatewayResult:
         import openai

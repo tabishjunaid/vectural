@@ -9,12 +9,12 @@ here decides whether the answer is releasable; the two gates downstream do (R1).
 from __future__ import annotations
 
 from backend.answer.personas import persona_instruction
-from backend.domain.models import Persona, TaskType
+from backend.domain.models import Complexity, Persona, TaskType
 from backend.llm.base import RoutedResponse
 from backend.llm.router import LLMRouter
 from backend.retrieval.base import SearchHit
 
-SYNTHESIS_PROMPT_VERSION = "synth-v6"
+SYNTHESIS_PROMPT_VERSION = "synth-v7"
 
 # How much of each retrieved chunk to put in front of the model.
 #
@@ -29,6 +29,62 @@ SYNTHESIS_PROMPT_VERSION = "synth-v6"
 # that is a few thousand tokens of evidence, which is what an answer needs.
 EVIDENCE_CHARS_PER_CHUNK = 1500
 
+# The full multi-section contract — the everyday answer shape. The UI splits on
+# these `## ` headings (AnswerSections), so the prefix and names are load-bearing.
+_FULL_FORMAT = (
+    "FORMAT — write each section as a level-2 markdown heading, exactly "
+    "`## <Name>`, using these names verbatim and in this order (the UI splits "
+    "the answer on these headings, so the `## ` prefix and the names are a "
+    "hard contract):\n"
+    "## Summary — a short orienting paragraph (2-4 sentences) that answers the "
+    "question directly and frames what the rest of the answer covers.\n"
+    "## Diagram — IF the question is about structure, flow, relationships, "
+    "architecture, or how components connect, include ONE Mermaid diagram in a "
+    "```mermaid fenced block (use `flowchart TD` for structure/dependencies or "
+    "`sequenceDiagram` for a flow over time). Draw ONLY relationships the "
+    "evidence supports and that you also state in prose. Keep node labels short "
+    "and put NO citation markers inside the diagram. Omit this whole section "
+    "for a purely factual or definitional question — never invent a diagram to "
+    "fill space.\n"
+    "## How it works — the mechanism as an ordered walkthrough. Use a numbered "
+    "list, one step per thing that actually happens, naming the function or "
+    "file that does it AND explaining, in a sentence or two per step, what that "
+    "step accomplishes and how it hands off to the next. Do not collapse the "
+    "sequence into a single alluding sentence.\n"
+    "## Key components — one bullet per component that matters: what it is, "
+    "what it is responsible for, where it lives, and how it relates to the "
+    "others. A bullet may run to several sentences when the component warrants "
+    "it.\n"
+    "## Configuration & wiring — where the behaviour is set or assembled: "
+    "settings, environment variables, factories, defaults and their values, "
+    "and what each one changes.\n"
+    "## Caveats & failure modes — limits, error paths, what happens when a "
+    "step fails, and anything deliberately not handled.\n\n"
+    "Each section is its own `## ` heading with its own content. Omit a section "
+    "the evidence genuinely cannot support — but never merge two sections, and "
+    "never replace one with a single summarising sentence. Prefer specifics "
+    "(function names, file paths, setting names, numbers) over vague statements, "
+    "and where you compare options or map one thing to another, a markdown "
+    "table is welcome.\n"
+    "Be as thorough as the evidence allows: do not invent detail the evidence "
+    "does not contain, but do not hold back either — if the evidence supports "
+    "six steps and their rationale, write all six and explain them.\n\n"
+)
+
+# The compact contract for a narrow lookup (SIMPLE). Deliberately does NOT list
+# the six sections — shown them, the model fills every one and pads a one-fact
+# answer. Summary-only by default; Key components only if warranted.
+_SIMPLE_FORMAT = (
+    "FORMAT — this is a direct, narrow question, so keep the answer tight. Write "
+    "`## Summary` — 2-4 sentences that answer the question directly, naming the "
+    "specifics (file paths, setting names, values) with their citations — and "
+    "STOP THERE. Add a `## Key components` section (short bullets) ONLY if there "
+    "are genuinely several distinct components the reader must have named. Do NOT "
+    "write Diagram, How it works, Configuration & wiring, or Caveats sections for "
+    "a question this narrow — they would only pad it. Each section is a `## ` "
+    "heading (the UI splits on them). Favour specifics over vague statements.\n\n"
+)
+
 
 def render_synthesis_prompt(
     question: str,
@@ -38,6 +94,7 @@ def render_synthesis_prompt(
     context_block: str = "",
     evidence_chars: int = EVIDENCE_CHARS_PER_CHUNK,
     exhaustive: bool = False,
+    complexity: Complexity = Complexity.MODERATE,
 ) -> str:
     evidence_lines = [
         f"- [{c.chunk_id}] {c.path}:{c.span} ({c.symbol or c.kind.value})\n"
@@ -72,6 +129,29 @@ def render_synthesis_prompt(
         if exhaustive
         else ""
     )
+    # Match the explanation to how involved the QUESTION is (independent of the
+    # depth budget above). A DEEP request is always exhaustive, so its note wins
+    # and we add nothing here. A COMPLEX question gets a push toward the full
+    # structure; a SIMPLE one is handled by a compact FORMAT block below (which is
+    # more reliable than a soft note against gpt-4o's pull toward the template).
+    complexity_note = ""
+    if not exhaustive and complexity is Complexity.COMPLEX:
+        complexity_note = (
+            "THIS IS AN INVOLVED, MULTI-PART QUESTION spanning several components "
+            "or a flow across services. Use the full structure: walk the mechanism "
+            "step by step, name every component that matters, and show how the "
+            "pieces connect — a diagram is usually warranted here. Do not compress "
+            "it into a couple of sentences.\n\n"
+        )
+
+    # A narrow lookup should not be handed the six-section scaffold at all — shown
+    # the full template, the model fills every heading and pads a one-fact answer.
+    # SIMPLE gets a compact contract instead; everything else gets the full one.
+    # (DEEP/exhaustive always wants the full structure, so it keeps it.)
+    if complexity is Complexity.SIMPLE and not exhaustive:
+        format_block = _SIMPLE_FORMAT
+    else:
+        format_block = _FULL_FORMAT
     return (
         f"{persona_instruction(persona)}\n\n"
         "Write a thorough, explanatory answer grounded ONLY in the evidence below. "
@@ -81,43 +161,8 @@ def render_synthesis_prompt(
         "supports; a well-covered question deserves a full walkthrough, not a "
         "summary.\n\n"
         f"{depth_note}"
-        "FORMAT — write each section as a level-2 markdown heading, exactly "
-        "`## <Name>`, using these names verbatim and in this order (the UI splits "
-        "the answer on these headings, so the `## ` prefix and the names are a "
-        "hard contract):\n"
-        "## Summary — a short orienting paragraph (2-4 sentences) that answers the "
-        "question directly and frames what the rest of the answer covers.\n"
-        "## Diagram — IF the question is about structure, flow, relationships, "
-        "architecture, or how components connect, include ONE Mermaid diagram in a "
-        "```mermaid fenced block (use `flowchart TD` for structure/dependencies or "
-        "`sequenceDiagram` for a flow over time). Draw ONLY relationships the "
-        "evidence supports and that you also state in prose. Keep node labels short "
-        "and put NO citation markers inside the diagram. Omit this whole section "
-        "for a purely factual or definitional question — never invent a diagram to "
-        "fill space.\n"
-        "## How it works — the mechanism as an ordered walkthrough. Use a numbered "
-        "list, one step per thing that actually happens, naming the function or "
-        "file that does it AND explaining, in a sentence or two per step, what that "
-        "step accomplishes and how it hands off to the next. Do not collapse the "
-        "sequence into a single alluding sentence.\n"
-        "## Key components — one bullet per component that matters: what it is, "
-        "what it is responsible for, where it lives, and how it relates to the "
-        "others. A bullet may run to several sentences when the component warrants "
-        "it.\n"
-        "## Configuration & wiring — where the behaviour is set or assembled: "
-        "settings, environment variables, factories, defaults and their values, "
-        "and what each one changes.\n"
-        "## Caveats & failure modes — limits, error paths, what happens when a "
-        "step fails, and anything deliberately not handled.\n\n"
-        "Each section is its own `## ` heading with its own content. Omit a section "
-        "the evidence genuinely cannot support — but never merge two sections, and "
-        "never replace one with a single summarising sentence. Prefer specifics "
-        "(function names, file paths, setting names, numbers) over vague statements, "
-        "and where you compare options or map one thing to another, a markdown "
-        "table is welcome.\n"
-        "Be as thorough as the evidence allows: do not invent detail the evidence "
-        "does not contain, but do not hold back either — if the evidence supports "
-        "six steps and their rationale, write all six and explain them.\n\n"
+        f"{complexity_note}"
+        f"{format_block}"
         "Citations: every claim-bearing sentence in the prose sections must cite "
         "the evidence it rests on with the evidence id in square brackets, e.g. "
         "[id]. Do not cite ids that are not listed. Connective or framing sentences "
@@ -143,6 +188,7 @@ def synthesise(
     evidence_chars: int = EVIDENCE_CHARS_PER_CHUNK,
     max_tokens: int | None = None,
     exhaustive: bool = False,
+    complexity: Complexity = Complexity.MODERATE,
     model_override_id: str | None = None,
     prompt_version: str = SYNTHESIS_PROMPT_VERSION,
 ) -> RoutedResponse:
@@ -153,6 +199,7 @@ def synthesise(
         context_block=context_block,
         evidence_chars=evidence_chars,
         exhaustive=exhaustive,
+        complexity=complexity,
     )
     payload: dict[str, object] = {"prompt": prompt}
     if max_tokens is not None:

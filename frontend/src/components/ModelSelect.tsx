@@ -22,7 +22,10 @@ export function ModelSelect() {
           <Select.Popup className="persona-select-popup">
             {models.map((m) => (
               <Select.Item key={m.id} value={m.id} className="persona-select-item">
-                <Select.ItemText>{m.label}</Select.ItemText>
+                <Select.ItemText>
+                  {m.label}
+                  {m.hint && <span className="model-item-hint"> · {m.hint}</span>}
+                </Select.ItemText>
                 <Select.ItemIndicator aria-hidden>✓</Select.ItemIndicator>
               </Select.Item>
             ))}

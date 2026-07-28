@@ -38,6 +38,22 @@ class Depth(StrEnum):
     DEEP = "deep"
 
 
+class Complexity(StrEnum):
+    """How involved the *question* is — inferred, not chosen by the user.
+
+    Orthogonal to both :class:`Persona` (altitude) and :class:`Depth` (budget):
+    depth is the ceiling the user picks, complexity is how much of that ceiling
+    the question actually warrants. A one-fact lookup ("which project uses Neo4j")
+    is SIMPLE and should get a concise answer even at STANDARD; a cross-service
+    "how does A charge via B and C" is COMPLEX and earns the full walkthrough.
+    Assessed deterministically from cheap planning signals — no extra model call.
+    See :func:`backend.answer.complexity.assess_complexity`."""
+
+    SIMPLE = "simple"
+    MODERATE = "moderate"
+    COMPLEX = "complex"
+
+
 class TaskType(StrEnum):
     """Every distinct call the routing layer (§5.1) can make.
 

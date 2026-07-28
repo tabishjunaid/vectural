@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from backend.answer.cache import SemanticAnswerCache
 from backend.answer.citations import resolve_citations
+from backend.answer.complexity import assess_complexity
 from backend.answer.context import (
     AnswerContext,
     StructuralContext,
@@ -33,7 +34,7 @@ from backend.answer.groundedness import check_groundedness
 from backend.answer.models import Answer, AnswerMode, LlmCall, QueryAnalytics
 from backend.answer.plan import RetrievalPlanner
 from backend.answer.synthesis import synthesise
-from backend.domain.models import Depth, Persona
+from backend.domain.models import Complexity, Depth, Persona
 from backend.freshness.state import FreshnessState
 from backend.llm import catalog
 from backend.llm.base import UsageRecord
@@ -169,7 +170,7 @@ class AnswerService:
             yield AnswerStage("cache", "miss", "Not cached — computing a fresh answer")
 
         yield AnswerStage("plan", "start", "Planning which services to search")
-        plan = self.planner.plan(question, persona)
+        plan = self.planner.plan(question, persona, model_override_id=model)
         usage.extend(plan.usage)  # entity-linking + 1-2 Cypher calls
         scope_label = ", ".join(sorted(plan.scope)) if plan.scope else "the whole estate"
         yield AnswerStage("plan", "ok", f"Scope: {scope_label}")
@@ -210,6 +211,11 @@ class AnswerService:
             return
         yield AnswerStage("retrieve", "ok", f"Found {len(hits)} passages of evidence")
 
+        # How involved is the question itself? Deterministic, no model call — shapes
+        # the synthesis explanation (concise for a lookup, full for a flow) within
+        # the depth budget the user chose. See backend/answer/complexity.py.
+        complexity = assess_complexity(question, plan, hits)
+
         # Background that fragments cannot supply: what the touched services and
         # modules are responsible for, and how they depend on each other.
         ctx = gather_context(
@@ -239,6 +245,7 @@ class AnswerService:
             evidence_chars=budget.evidence_chars,
             max_tokens=budget.max_tokens,
             exhaustive=budget.exhaustive,
+            complexity=complexity,
             model_override_id=model,
         )
         usage.append(response.usage)
@@ -266,6 +273,7 @@ class AnswerService:
                         usage, latency_ms=elapsed_ms(), model=model, depth=depth,
                         persona=persona, mode="refusal", from_cache=False,
                         citations=len(resolution.resolved), evidence_chunks=len(hits),
+                        complexity=complexity,
                     )
                 }
             )
@@ -273,15 +281,24 @@ class AnswerService:
         yield AnswerStage("cite", "ok", f"{len(resolution.resolved)} citations resolved")
 
         # Gate 2 — groundedness, a separate Haiku call (§5.4).
+        # Scope the evidence to the chunks the answer actually CITED (gate 1 just
+        # resolved them), truncated to the same budget synthesis used. The judge
+        # then verifies against exactly the material the answer rested on — cheaper
+        # (no re-reading the 20 unrelated retrieved chunks at full length) and more
+        # accurate. Defensive: never hand the gate zero evidence.
+        cited_ids = {c.chunk_id for c in resolution.resolved}
+        cited_hits = [h for h in hits if h.chunk_id in cited_ids] or hits
         yield AnswerStage("ground", "start", "Verifying each claim against the evidence")
         grounded = check_groundedness(
             self.router,
             answer_text=answer_text,
-            chunks=hits,
+            chunks=cited_hits,
             # The judge must see what synthesis saw, or context-derived claims are
             # rejected for being unverifiable against chunks alone.
             context_block=context_block,
+            evidence_chars=budget.evidence_chars,
             persona=persona,
+            model_override_id=model,
         )
         if grounded.usage is not None:
             usage.append(grounded.usage)
@@ -304,6 +321,7 @@ class AnswerService:
                         usage, latency_ms=elapsed_ms(), model=model, depth=depth,
                         persona=persona, mode="refusal", from_cache=False,
                         citations=len(resolution.resolved), evidence_chunks=len(hits),
+                        complexity=complexity,
                     )
                 }
             )
@@ -322,6 +340,7 @@ class AnswerService:
                     usage, latency_ms=elapsed_ms(), model=model, depth=depth,
                     persona=persona, mode="synthesized", from_cache=False,
                     citations=len(resolution.resolved), evidence_chunks=len(hits),
+                    complexity=complexity,
                 )
             }
         )
@@ -360,6 +379,7 @@ def _build_analytics(
     from_cache: bool,
     citations: int,
     evidence_chunks: int,
+    complexity: Complexity | None = None,
 ) -> QueryAnalytics:
     """Assemble the per-query analytics from the UsageRecords collected this query."""
     calls = [
@@ -393,6 +413,7 @@ def _build_analytics(
         from_cache=from_cache,
         citations=citations,
         evidence_chunks=evidence_chunks,
+        complexity=complexity.value if complexity is not None else None,
         cost_usd=_estimate_cost(usage),
     )
 
