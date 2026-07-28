@@ -102,9 +102,9 @@ def _match_unambiguously(marker: str, retrieved: list[SearchHit]) -> SearchHit |
     id falls back to matching on its own trailing hash — the content-addressed
     part that actually identifies the chunk.
 
-    Fail-closed is preserved: a marker matching zero or **more than one** chunk
-    stays unresolved. Only an unambiguous reference resolves, so this never
-    invents an attribution or silently picks between candidates.
+    Hash-based resolution stays strict — a hash is specific, so exactly one chunk
+    matches or the reference is genuinely ambiguous. Path/file-level resolution is
+    deliberately not: see below.
     """
     hits = [h for h in retrieved if h.chunk_id.rsplit(":", 1)[-1] == marker]
     if not hits:
@@ -113,16 +113,24 @@ def _match_unambiguously(marker: str, retrieved: list[SearchHit]) -> SearchHit |
         # A full/partial id whose path/lines drifted: match on its trailing hash.
         tail = marker.rsplit(":", 1)[-1]
         hits = [h for h in retrieved if h.chunk_id.rsplit(":", 1)[-1] == tail]
-    if not hits and ":" in marker:
-        # Model named a real file but botched the lines/hash (or used a "..."
-        # placeholder). Resolve on the path segment when it identifies exactly one
-        # retrieved chunk. R1-safe: only ever points at evidence that was actually
-        # retrieved (a hallucinated file matches nothing), and groundedness still
-        # re-checks the claim.
-        path = next((seg for seg in marker.split(":") if "/" in seg), "")
-        if path:
-            hits = [h for h in retrieved if path in h.chunk_id]
-    return hits[0] if len(hits) == 1 else None
+    if hits:
+        return hits[0] if len(hits) == 1 else None
+    # File/module-level citation: models routinely cite a file by path — a bare
+    # `backend/graph/schema.py` (gpt-5) or a `service:path:symbol` like
+    # `vectural:…/opensearch_backend.py:connect` (qwen) — rather than reproducing
+    # the exact chunk id. A *relevant* file usually has SEVERAL retrieved chunks, so
+    # requiring exactly one match refused these as "ambiguous" even though the file's
+    # evidence was retrieved. If the cited path matches one or more retrieved chunks,
+    # the claim rests on that file's retrieved evidence — resolve to the best-scored
+    # one (groundedness still re-checks the claim against it). Fail-closed intact: a
+    # path matching NO retrieved chunk (an un-retrieved or hallucinated file) resolves
+    # to nothing and the gate refuses.
+    if "/" in marker:
+        path = next((seg for seg in marker.split(":") if "/" in seg), marker)
+        candidates = [h for h in retrieved if path in h.chunk_id]
+        if candidates:
+            return max(candidates, key=lambda h: h.score)
+    return None
 
 
 def resolve_citations(text: str, retrieved: list[SearchHit]) -> CitationResolution:

@@ -67,6 +67,21 @@ def test_bracketed_prose_with_a_colon_is_not_a_citation() -> None:
     assert [c.marker for c in res.resolved] == ["b55297ee"]
 
 
+def test_file_level_citation_resolves_when_the_file_has_several_chunks() -> None:
+    """Regression (gpt-5 AND qwen at Standard both refused): models cite a file by
+    path — a bare `backend/graph/schema.py` or a `service:path:symbol` like
+    `…/opensearch_backend.py:connect` — and a relevant file usually has MULTIPLE
+    retrieved chunks. That citation rests on the file's retrieved evidence, so it
+    resolves (to the best-scored chunk) rather than being refused as ambiguous."""
+    a = _hit("svc:svc/backend/store.py:1-20:aaa111", path="svc/backend/store.py")
+    b = _hit("svc:svc/backend/store.py:21-40:bbb222", path="svc/backend/store.py")
+    b = b.model_copy(update={"score": 9.0})  # the best-scored chunk of that file
+    for marker in ("svc/backend/store.py", "svc:svc/backend/store.py:connect"):
+        res = resolve_citations(f"The store connects to Neo4j [{marker}].", [a, b])
+        assert res.ok, marker
+        assert res.resolved[0].chunk_id == "svc:svc/backend/store.py:21-40:bbb222"
+
+
 def test_reconstructed_full_id_resolves_on_its_trailing_hash() -> None:
     """Regression (gpt-5-mini): the model rebuilt the full id from memory with the
     path/line-range wrong but the distinctive trailing hash right. It must resolve
