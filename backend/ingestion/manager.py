@@ -52,6 +52,11 @@ _TERMINAL = frozenset({"done", "failed", "cancelled"})
 _CLONE_OK = frozenset({"cloned", "updated", "would clone", "would update"})
 
 
+def _looks_like_git_url(source: str) -> bool:
+    """Whether an add-repo source is a Git URL to clone (vs. a local folder name)."""
+    return "://" in source or source.startswith("git@") or source.endswith(".git")
+
+
 class IngestionError(RuntimeError):
     """A repo add / drop could not complete (bad URL, clone failure, unknown repo)."""
 
@@ -184,23 +189,44 @@ class IngestionService:
 
     # -- mutate ------------------------------------------------------------ #
 
-    def add_repo(self, url: str) -> RepoState:
-        """Clone a repo by URL into the estate and register it in the manifest."""
-        url = url.strip()
-        if not url:
-            raise IngestionError("a Git URL is required")
-        name, outcome = clone_repo_url(url, self.estate_root)
-        if outcome not in _CLONE_OK:
-            raise IngestionError(f"clone failed for {url!r}: {outcome}")
+    def add_repo(self, source: str) -> RepoState:
+        """Register a repo. ``source`` is either a **Git URL** (cloned into the
+        estate) or the **name of a folder already sitting under the estate root**
+        (a local project — nothing is cloned). The latter is how you add a project
+        from your machine: drop its folder into the estate directory, then add it by
+        name (and it's how you re-add a repo after Drop, since Drop keeps the
+        source). The backend only sees the mounted estate, so a local project must
+        live under the estate root."""
+        source = source.strip()
+        if not source:
+            raise IngestionError("enter a Git URL or a local folder name")
 
+        if _looks_like_git_url(source):
+            name, outcome = clone_repo_url(source, self.estate_root)
+            if outcome not in _CLONE_OK:
+                raise IngestionError(f"clone failed for {source!r}: {outcome}")
+            return self._register(name, git_url=source)
+
+        # A local directory already under the estate root — register it, no clone.
+        name = source.strip("/").split("/")[-1]
+        if not (self.estate_root / name).is_dir():
+            raise IngestionError(
+                f"{source!r} is not a Git URL, and no folder {name!r} exists in the "
+                "estate. Put the project folder inside the estate directory first, "
+                "then add it by name."
+            )
+        return self._register(name, git_url=None)
+
+    def _register(self, name: str, *, git_url: str | None) -> RepoState:
+        """Add (or update) a service entry in the manifest and return its state."""
         manifest = self._load_manifest()
         existing = next((s for s in manifest.services if s.name == name), None)
         if existing is None:
-            manifest.services.append(ServiceManifest(name=name, path=name, git_url=url))
+            manifest.services.append(ServiceManifest(name=name, path=name, git_url=git_url))
             save_manifest(manifest, self.manifest_path)
-        elif existing.git_url != url:
+        elif git_url and existing.git_url != git_url:
             # Remember the origin URL on a repo that was previously hand-authored.
-            updated = existing.model_copy(update={"git_url": url})
+            updated = existing.model_copy(update={"git_url": git_url})
             manifest = Manifest(
                 services=[updated if s.name == name else s for s in manifest.services]
             )

@@ -79,6 +79,35 @@ def test_drop_removes_exactly_one_service(tmp_path: Path) -> None:
     assert any(r.key == "beta" for r in svc.summaries.all(3))
 
 
+def test_add_local_folder_registers_without_clone(tmp_path: Path) -> None:
+    (tmp_path / "epsilon").mkdir()
+    (tmp_path / "epsilon" / "x.py").write_text("x = 1\n")
+    manifest_path = tmp_path / "manifest.yaml"
+    save_manifest(Manifest(services=[]), manifest_path)
+    svc = IngestionService(
+        estate_root=tmp_path, manifest_path=manifest_path,
+        search=InMemorySearchBackend(embedder=HashingEmbedder()),
+        graph=InMemoryGraphStore.from_graph([], []), file_ledger=InMemoryFileLedger(),
+    )
+    row = svc.add_repo("epsilon")  # a local folder name, NOT a Git URL — no clone
+    assert row.service == "epsilon" and row.git_url is None
+    assert "epsilon" in {r.service for r in svc.list_repos()}
+
+
+def test_add_unknown_local_folder_raises(tmp_path: Path) -> None:
+    save_manifest(Manifest(services=[]), tmp_path / "manifest.yaml")
+    svc = IngestionService(
+        estate_root=tmp_path, manifest_path=tmp_path / "manifest.yaml",
+        search=InMemorySearchBackend(embedder=HashingEmbedder()),
+        graph=InMemoryGraphStore.from_graph([], []), file_ledger=InMemoryFileLedger(),
+    )
+    try:
+        svc.add_repo("does-not-exist")
+    except IngestionError:
+        return
+    raise AssertionError("expected IngestionError for an unknown local folder")
+
+
 def test_drop_unknown_repo_raises(tmp_path: Path) -> None:
     svc = _seed(tmp_path)
     try:

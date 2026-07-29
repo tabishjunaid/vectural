@@ -148,9 +148,10 @@ export function Ingest() {
       <div className="main-scroll">
         <div className="main-inner">
           <p className="compare-intro">
-            Add a repo by URL, estimate its cost, then index it (free · local) and summarise it
-            — pick a model; a local Ollama model runs on-device for $0. Watch live progress; pause,
-            cancel, or drop.
+            Add a repo by Git URL (cloned) — or add a local project by folder name once its
+            folder is in the estate directory. Estimate its cost, then index it (free · local)
+            and summarise it — pick a model; a local Ollama model runs on-device for $0. Watch
+            live progress; pause, cancel, or drop.
           </p>
 
           <div className="ingest-addbar">
@@ -158,7 +159,7 @@ export function Ingest() {
               type="text"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://github.com/org/repo.git"
+              placeholder="Git URL to clone, or a local folder name already in the estate"
               onKeyDown={(e) => e.key === 'Enter' && onAdd()}
             />
             <button className="composer-send" onClick={onAdd} disabled={busy}>
