@@ -31,6 +31,7 @@ from backend.api.schemas import HealthResponse, SearchRequest, SearchResponse
 from backend.domain.models import Depth, Persona
 from backend.flows.models import FlowNarrative
 from backend.flows.service import FlowNarrativeService, FlowNotFoundError
+from backend.ingestion.manager import IngestionError, IngestionService, RepoState
 from backend.llm import catalog
 from backend.observability.metrics import MetricsCollector, MetricsSnapshot
 from backend.retrieval.service import RetrievalService
@@ -57,9 +58,25 @@ def _get_flows(request: Request) -> FlowNarrativeService:
     return service
 
 
+def _get_ingestion(request: Request) -> IngestionService:
+    service = getattr(request.app.state, "ingestion_service", None)
+    if not isinstance(service, IngestionService):
+        raise HTTPException(status_code=501, detail="ingestion not enabled")
+    return service
+
+
 RetrievalDep = Annotated[RetrievalService, Depends(_get_retrieval)]
 AnswerDep = Annotated[AnswerService, Depends(_get_answer)]
 FlowsDep = Annotated[FlowNarrativeService, Depends(_get_flows)]
+IngestionDep = Annotated[IngestionService, Depends(_get_ingestion)]
+
+
+class AddRepoRequest(BaseModel):
+    url: str
+
+
+class EstimateRequest(BaseModel):
+    model: str | None = None
 
 
 class ModelOption(BaseModel):
@@ -77,6 +94,7 @@ def create_app(
     answer_service: AnswerService | None = None,
     flow_service: FlowNarrativeService | None = None,
     coverage_service: CoverageService | None = None,
+    ingestion_service: IngestionService | None = None,
     metrics: MetricsCollector | None = None,
     cors_origins: list[str] | None = None,
     model_providers: set[str] | None = None,
@@ -90,6 +108,7 @@ def create_app(
     app.state.answer_service = answer_service
     app.state.flow_service = flow_service
     app.state.coverage_service = coverage_service
+    app.state.ingestion_service = ingestion_service
     app.state.metrics = metrics
     # Providers a per-question model override can reach (drives GET /models). When
     # unset (e.g. tests calling create_app directly), fall back to whatever
@@ -121,6 +140,33 @@ def create_app(
         if not isinstance(service, CoverageService):
             raise HTTPException(status_code=501, detail="coverage not enabled")
         return service.rows()
+
+    @app.get("/ingest/repos", response_model=list[RepoState], tags=["ingestion"])
+    def ingest_list(service: IngestionDep) -> list[RepoState]:
+        return service.list_repos()
+
+    @app.post("/ingest/repos", response_model=RepoState, tags=["ingestion"])
+    def ingest_add(req: AddRepoRequest, service: IngestionDep) -> RepoState:
+        try:
+            return service.add_repo(req.url)
+        except IngestionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/ingest/repos/{repo}/estimate", tags=["ingestion"])
+    def ingest_estimate(
+        repo: str, req: EstimateRequest, service: IngestionDep
+    ) -> dict[str, object]:
+        try:
+            return service.estimate(repo, model=req.model)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"unknown repo {repo!r}") from exc
+
+    @app.delete("/ingest/repos/{repo}", tags=["ingestion"])
+    def ingest_drop(repo: str, service: IngestionDep) -> dict[str, int]:
+        try:
+            return service.drop(repo)
+        except IngestionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/search", response_model=SearchResponse, tags=["retrieval"])
     def search(req: SearchRequest, service: RetrievalDep) -> SearchResponse:

@@ -29,6 +29,7 @@ from backend.flows.review import FlowStore
 from backend.graph import StructuralQueries, build_graph
 from backend.graph.builder import GraphBuildResult
 from backend.graph.store import GraphStore
+from backend.ingestion.manager import IngestionService
 from backend.llm import LLMRouter
 from backend.llm.factory import build_gateways
 from backend.observability import MetricsCollector
@@ -157,12 +158,21 @@ def build_services(
     coverage = CoverageService(
         manifest=manifest, graph=store.graph, summaries=summaries, flows=flows
     )
+    ingestion = IngestionService(
+        estate_root=estate_root,
+        manifest_path=manifest_path,
+        search=store.search,
+        graph=store.graph,
+        file_ledger=store.file_ledger,
+        summaries=summaries,
+    )
 
     app = create_app(
         retrieval,
         answer_service=answer,
         flow_service=flows,
         coverage_service=coverage,
+        ingestion_service=ingestion,
         metrics=metrics,
         cors_origins=cors_origins,
         model_providers=model_providers,
