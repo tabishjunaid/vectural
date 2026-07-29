@@ -220,6 +220,13 @@ class IngestionService:
         if not any(s.name == service for s in manifest.services):
             raise IngestionError(f"unknown repo {service!r}")
 
+        # Remove from the manifest FIRST, so a read-only estate (or any write error)
+        # fails here before we touch the stores — no half-dropped state. The store
+        # deletes are all idempotent, so a re-drop after any later hiccup finishes
+        # cleanly.
+        remaining = [s for s in manifest.services if s.name != service]
+        save_manifest(Manifest(services=remaining), self.manifest_path)
+
         paths = [p for (svc, p) in self.search.indexed_files() if svc == service]
         chunks = self.search.delete_service(service)
         for path in paths:
@@ -227,9 +234,6 @@ class IngestionService:
             self.file_ledger.delete(service, path)
         self.graph.delete_node(NodeKind.SERVICE, service)
         summaries = self.summaries.delete_service(service) if self.summaries is not None else 0
-
-        remaining = [s for s in manifest.services if s.name != service]
-        save_manifest(Manifest(services=remaining), self.manifest_path)
         return {"chunks": chunks, "files": len(paths), "summaries": summaries}
 
     # -- jobs: deterministic index (async, pausable) ----------------------- #

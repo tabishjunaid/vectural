@@ -35,8 +35,9 @@ x-vectural-env: &vectural-env
 
 x-vectural-volumes: &vectural-volumes
   # The estate to serve/index (defaults to the bundled sample-estate); the model cache
-  # so BGE-M3 downloads once and persists across restarts.
-  - ${VECTURAL_ESTATE_HOST_PATH:-./sample-estate}:/estate:ro
+  # so BGE-M3 downloads once and persists across restarts. Mounted read-WRITE: the
+  # Ingestion UI clones new repos into it and rewrites manifest.yaml on add/drop.
+  - ${VECTURAL_ESTATE_HOST_PATH:-./sample-estate}:/estate
   - hf-cache:/root/.cache/huggingface
   # Your `ant auth login` credentials, so the SDK can use them when VECTURAL_GATEWAY=real
   # and no ANTHROPIC_API_KEY is set. Read-write so the SDK can refresh the OAuth token.
