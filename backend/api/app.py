@@ -20,6 +20,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from backend.answer.models import Answer
 from backend.answer.service import AnswerService, AnswerStage
@@ -27,9 +28,10 @@ from backend.api.answer_schemas import AskRequest
 from backend.api.coverage import CoverageRow, CoverageService
 from backend.api.review_schemas import ReviewAction
 from backend.api.schemas import HealthResponse, SearchRequest, SearchResponse
-from backend.domain.models import Persona
+from backend.domain.models import Depth, Persona
 from backend.flows.models import FlowNarrative
 from backend.flows.service import FlowNarrativeService, FlowNotFoundError
+from backend.llm import catalog
 from backend.observability.metrics import MetricsCollector, MetricsSnapshot
 from backend.retrieval.service import RetrievalService
 
@@ -60,6 +62,15 @@ AnswerDep = Annotated[AnswerService, Depends(_get_answer)]
 FlowsDep = Annotated[FlowNarrativeService, Depends(_get_flows)]
 
 
+class ModelOption(BaseModel):
+    """One entry in the answer-model dropdown (GET /models)."""
+
+    id: str
+    label: str
+    provider: str
+    hint: str
+
+
 def create_app(
     retrieval: RetrievalService,
     *,
@@ -68,6 +79,7 @@ def create_app(
     coverage_service: CoverageService | None = None,
     metrics: MetricsCollector | None = None,
     cors_origins: list[str] | None = None,
+    model_providers: set[str] | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Vectural API",
@@ -79,6 +91,10 @@ def create_app(
     app.state.flow_service = flow_service
     app.state.coverage_service = coverage_service
     app.state.metrics = metrics
+    # Providers a per-question model override can reach (drives GET /models). When
+    # unset (e.g. tests calling create_app directly), fall back to whatever
+    # providers the catalog knows so the dropdown is still populated.
+    app.state.model_providers = model_providers or {m.provider for m in catalog.SELECTABLE_MODELS}
 
     # The React frontend (a different origin in dev) calls this API directly.
     app.add_middleware(
@@ -120,9 +136,19 @@ def create_app(
             hits=hits,
         )
 
+    @app.get("/models", response_model=list[ModelOption], tags=["answer"])
+    def models() -> list[ModelOption]:
+        # Only models whose provider gateway is actually wired — otherwise the
+        # dropdown would offer a model whose calls just fail.
+        providers = getattr(app.state, "model_providers", None) or set()
+        return [
+            ModelOption(id=m.id, label=m.label, provider=m.provider, hint=m.hint)
+            for m in catalog.available_models(providers)
+        ]
+
     @app.post("/ask", response_model=Answer, tags=["answer"])
     def ask(req: AskRequest, service: AnswerDep) -> Answer:
-        return service.answer(req.question, req.persona)
+        return service.answer(req.question, req.persona, req.depth, req.model)
 
     @app.post("/ask/stream", tags=["answer"])
     def ask_stream(req: AskRequest, service: AnswerDep) -> StreamingResponse:
@@ -131,7 +157,7 @@ def create_app(
         # answer is already computed. `X-Accel-Buffering: no` stops nginx from
         # buffering the stream and defeating that.
         return StreamingResponse(
-            _sse(service, req.question, req.persona),
+            _sse(service, req.question, req.persona, req.depth, req.model),
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
         )
@@ -186,14 +212,20 @@ def _flow_action(action: Callable[[], FlowNarrative]) -> FlowNarrative:
         raise HTTPException(status_code=404, detail=f"flow {exc} not found") from exc
 
 
-def _sse(service: AnswerService, question: str, persona: Persona) -> Iterator[str]:
+def _sse(
+    service: AnswerService,
+    question: str,
+    persona: Persona,
+    depth: Depth,
+    model: str | None = None,
+) -> Iterator[str]:
     """Stream the answer path as SSE: a ``stage`` event as each pipeline step runs,
     then a final ``done`` event with the answer (citations / refusal metadata).
 
     The generator is the live pipeline, so events are flushed as the work happens —
     the client sees "Searching…", "Drafting…", "Verifying…" while the slow gateway
     calls are still in flight, instead of nothing until the whole answer is ready."""
-    for item in service.stream(question, persona):
+    for item in service.stream(question, persona, depth, model):
         if isinstance(item, AnswerStage):
             yield _event("stage", item.model_dump())
         else:  # the terminal Answer — exactly one, last

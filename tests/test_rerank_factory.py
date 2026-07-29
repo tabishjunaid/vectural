@@ -99,7 +99,12 @@ def test_synthesis_prompt_truncates_and_says_so() -> None:
     huge = "x" * (EVIDENCE_CHARS_PER_CHUNK * 3)
     prompt = render_synthesis_prompt("q", Persona.ENGINEER, [_hit("a", huge)])
     assert "… (truncated)" in prompt  # marked, so a cut chunk is not read as complete
-    assert len(prompt) < len(huge)  # and actually bounded
+    # The evidence body is actually bounded to the budget: no run of the chunk's
+    # content longer than the limit survives, and the whole chunk certainly doesn't.
+    # (Asserted on the content run, not total prompt length — the instruction block
+    # is fixed overhead unrelated to truncation.)
+    assert "x" * (EVIDENCE_CHARS_PER_CHUNK + 1) not in prompt
+    assert huge not in prompt
 
 
 def _hit_id(chunk_id: str) -> SearchHit:
@@ -133,18 +138,20 @@ def test_ambiguous_abbreviation_stays_unresolved() -> None:
     guess about which source a claim rests on."""
     from backend.answer.citations import resolve_citations
 
-    hits = [_hit_id("svc:a.py:1-2:beef"), _hit_id("svc:b.py:1-2:beef")]
-    res = resolve_citations("claim [beef].", hits)
+    # A citation-shaped hash (hex) that matches two chunks resolves to neither.
+    hits = [_hit_id("svc:a.py:1-2:beefaa"), _hit_id("svc:b.py:1-2:beefaa")]
+    res = resolve_citations("claim [beefaa].", hits)
     assert not res.ok
-    assert res.unresolved == ["beef"]
+    assert res.unresolved == ["beefaa"]
 
 
 def test_hallucinated_marker_still_refuses() -> None:
     from backend.answer.citations import resolve_citations
 
-    res = resolve_citations("claim [totallymadeup].", [_hit_id("svc:a.py:1-2:abc123")])
+    # A hex-shaped citation attempt that matches nothing fails closed.
+    res = resolve_citations("claim [deadbeef].", [_hit_id("svc:a.py:1-2:abc123")])
     assert not res.ok
-    assert res.unresolved == ["totallymadeup"]
+    assert res.unresolved == ["deadbeef"]
 
 
 def test_ungrounded_reason_names_the_rejected_claim() -> None:

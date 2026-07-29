@@ -247,6 +247,62 @@ Resume later from **Step 4**; no re-indexing, no new spend.
 
 ---
 
+## Re-indexing after the estate changes
+
+When the code in the estate changes — you pulled a repo, checked out a different
+commit, added a service — indexing again is cheap: the file ledger skips every
+file whose content hash and prompt version still match, so only what actually
+changed is re-summarised.
+
+But there is one order that matters.
+
+> **Restart the worker before you re-index.**
+>
+> ```bash
+> docker compose --profile indexing up -d --force-recreate worker
+> ```
+
+**Why.** The worker walks the estate and builds its work map **once, at startup**.
+A worker that was already running holds the old file list, so a re-index against
+a changed estate finds nothing to do — and reports success while doing it:
+
+```
+Workflow finished: {'completed': ['vectural', 'synapse', …]}   ← all 8 services "done"
+```
+
+…with the chunk count unchanged and the new files nowhere in the index. Nothing
+errors, nothing warns. The files are visible inside the container the whole time
+(`docker exec vectural-worker-1 ls /estate/…` finds them); it is the worker's
+in-memory map that is stale, not the mount.
+
+**Verify by the numbers, not by the message.** Take a count before and after:
+
+```bash
+curl -s 'localhost:9200/vectural-chunks-code/_count'
+```
+
+If the count did not move and you expected new files, the worker was stale —
+restart it and run again. A more specific check, for a file you know is new:
+
+```bash
+curl -s 'localhost:9200/vectural-chunks-code/_count' -H 'content-type: application/json' -d '{"query":{"match_phrase":{"path":"<service>/<path/to/new_file.py>"}}}'
+```
+
+**Full sequence:**
+
+```bash
+cd /Users/tabishjunaid/work/project/codebase/vectural && docker compose --profile indexing up -d --force-recreate worker
+```
+
+```bash
+docker compose run --rm --no-deps backend vectural-index --wait
+```
+
+Give the worker ~30 s to load BGE-M3 and log `worker ready` before starting the
+run, or the starter waits on an empty task queue.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -258,6 +314,9 @@ Resume later from **Step 4**; no re-indexing, no new spend.
 | BGE-M3 won't load | `hf-cache` was deleted. Set `HF_HUB_OFFLINE=0` in `.env` for one run, then back to `1`. |
 | Workflow stuck, worker idle | Activities have no heartbeats, so Temporal waits out the 30-min timeout after a worker crash. Terminate and re-run — completed files are skipped, so resume costs nothing: `docker exec vectural-temporal-1 temporal workflow terminate --workflow-id index-estate --address temporal:7233 --reason restart` |
 | Workflow id not found | The id comes from the `/estate` **mount** name, not your host folder — it is always `index-estate`. |
+| Re-index says `Workflow finished … completed` but **nothing changed** | The worker was started before the estate changed and is still holding the file map it built at boot. Restart it and re-run — see *Re-indexing after the estate changes*. Confirm with the chunk count, not the success message. |
+| `[Errno -2] Name or service not known` / `APIConnectionError` in worker logs | DNS to the gateway failed, usually a blip just after a container restart. This is a `TransientGatewayError`: Temporal retries with backoff and the ledger means no completed file is redone. Not fatal — confirm DNS is back before intervening: `docker exec vectural-worker-1 python -c "import httpx;print(httpx.get('https://api.openai.com/v1/models',timeout=10).status_code)"` — **any** HTTP status means DNS and TLS work; `401` is the expected answer here because the probe sends no API key. Only a raised exception means still-broken. |
+| Worker logs show `Traceback` | Not automatically a failure — caught-and-retried gateway errors log a traceback too. Only `context_length_exceeded`, `OOMKilled`, or a terminal workflow status are fatal. Grepping for `Traceback` alone produces false alarms. |
 
 ### Rebuilding after a source change
 

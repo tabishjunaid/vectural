@@ -77,8 +77,10 @@ class AnthropicGatewayClient:
         if request.json_mode:
             system = f"{system}\n\n{_JSON_SUFFIX}" if system else _JSON_SUFFIX
 
+        # A per-request model override (the model dropdown) selects a concrete
+        # Claude id; temperature stays omitted (current Claude models reject it).
         kwargs: dict[str, Any] = {
-            "model": self._models[request.model],
+            "model": request.model_override or self._models[request.model],
             "max_tokens": request.max_tokens,
             "messages": [{"role": "user", "content": request.prompt}],
         }
@@ -112,6 +114,7 @@ class AnthropicGatewayClient:
             text=text,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            model=request.model_override or self._models[request.model],
         )
 
 

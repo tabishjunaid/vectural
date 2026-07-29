@@ -23,8 +23,27 @@ _TASK_MODEL: dict[TaskType, ModelName] = {
 }
 
 
+# Output ceiling per task. Previously one global 1024 for everything, which gave a
+# full architectural answer the same budget as a one-line groundedness verdict —
+# the binding constraint on answer length. Structured verdicts stay small on
+# purpose: they emit a short JSON object, and a large ceiling there would only
+# raise cost. Synthesis is the caller that actually needs room, and it overrides
+# this per request from the depth budget (backend/answer/depth.py).
+_DEFAULT_MAX_TOKENS = 1024
+_TASK_MAX_TOKENS: dict[TaskType, int] = {
+    TaskType.SYNTHESIS: 6500,  # prose answer; depth raises/lowers this per request
+    TaskType.FLOW_NARRATIVE: 2000,  # tier 4 is a multi-paragraph narrative
+    TaskType.SERVICE_SUMMARY: 1500,  # tier 3 aggregates a whole service
+}
+
+
 def model_for(task_type: TaskType) -> ModelName:
     return _TASK_MODEL[task_type]
+
+
+def max_tokens_for(task_type: TaskType) -> int:
+    """The output ceiling for a task, before any per-request override."""
+    return _TASK_MAX_TOKENS.get(task_type, _DEFAULT_MAX_TOKENS)
 
 
 def task_uses_json(task_type: TaskType) -> bool:

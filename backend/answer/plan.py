@@ -15,11 +15,12 @@ within the plan). The steps:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from backend.domain.models import Persona, TaskType
 from backend.graph.cypher_validator import validate_cypher
 from backend.graph.queries import StructuralQueries, cypher_service_dependencies
+from backend.llm.base import UsageRecord
 from backend.llm.router import LLMRouter
 
 ENTITY_LINKING_PROMPT_VERSION = "entity-v1"
@@ -33,6 +34,10 @@ class RetrievalPlan:
     cypher: str | None
     used_fallback: bool
     cypher_attempts: int
+    # Token usage for the planner's own LLM calls (entity-linking + 1-2 Cypher),
+    # so the answer path can report per-query analytics. Default empty for callers
+    # that construct a plan without routing.
+    usage: list[UsageRecord] = field(default_factory=list)
 
 
 class RetrievalPlanner:
@@ -49,9 +54,21 @@ class RetrievalPlanner:
         self._services = services
         self._hops = hops
 
-    def plan(self, question: str, persona: Persona | None = None) -> RetrievalPlan:
-        anchors = self._entity_link(question, persona)
-        cypher, used_fallback, attempts = self._plan_cypher(question, anchors, persona)
+    def plan(
+        self,
+        question: str,
+        persona: Persona | None = None,
+        *,
+        model_override_id: str | None = None,
+    ) -> RetrievalPlan:
+        # model_override_id routes the planner's own LLM calls (entity-linking +
+        # Cypher) to a chosen model/provider, so a "run the whole query locally"
+        # pick reaches every call, not just synthesis.
+        usage: list[UsageRecord] = []
+        anchors = self._entity_link(question, persona, usage, model_override_id)
+        cypher, used_fallback, attempts = self._plan_cypher(
+            question, anchors, persona, usage, model_override_id
+        )
         scope = self._scope(anchors)
         return RetrievalPlan(
             anchors=anchors,
@@ -59,20 +76,31 @@ class RetrievalPlanner:
             cypher=cypher,
             used_fallback=used_fallback,
             cypher_attempts=attempts,
+            usage=usage,
         )
 
     # -- step 1: entity linking -------------------------------------------- #
 
-    def _entity_link(self, question: str, persona: Persona | None) -> list[str]:
+    def _entity_link(
+        self,
+        question: str,
+        persona: Persona | None,
+        usage: list[UsageRecord],
+        model_override_id: str | None = None,
+    ) -> list[str]:
         q_low = question.lower()
         deterministic = {svc for svc in self._services if svc.lower() in q_low}
 
         response = self._router.route(
             TaskType.ENTITY_LINKING,
             ENTITY_LINKING_PROMPT_VERSION,
-            {"prompt": f"Name the services this question is about: {question}"},
+            {
+                "prompt": f"Name the services this question is about: {question}",
+                "model_override_id": model_override_id,
+            },
             persona,
         )
+        usage.append(response.usage)
         model_anchors = response.parsed.get("anchors", []) if response.parsed else []
         merged = deterministic | {
             a for a in model_anchors if isinstance(a, str) and a in self._services
@@ -82,9 +110,17 @@ class RetrievalPlanner:
     # -- steps 2-3: cypher generation + validation ------------------------- #
 
     def _plan_cypher(
-        self, question: str, anchors: list[str], persona: Persona | None
+        self,
+        question: str,
+        anchors: list[str],
+        persona: Persona | None,
+        usage: list[UsageRecord],
+        model_override_id: str | None = None,
     ) -> tuple[str | None, bool, int]:
-        candidate = self._generate_cypher(question, anchors, persona, reason=None)
+        candidate = self._generate_cypher(
+            question, anchors, persona, reason=None, usage=usage,
+            model_override_id=model_override_id,
+        )
         result = validate_cypher(candidate) if candidate else None
         attempts = 1
         if result is not None and result.ok:
@@ -92,7 +128,10 @@ class RetrievalPlanner:
 
         # One regeneration retry with the failure reason appended (§5.2).
         reason = result.reason if result is not None else "no cypher produced"
-        candidate = self._generate_cypher(question, anchors, persona, reason=reason)
+        candidate = self._generate_cypher(
+            question, anchors, persona, reason=reason, usage=usage,
+            model_override_id=model_override_id,
+        )
         attempts = 2
         result = validate_cypher(candidate) if candidate else None
         if result is not None and result.ok:
@@ -102,7 +141,14 @@ class RetrievalPlanner:
         return cypher_service_dependencies(self._hops), True, attempts
 
     def _generate_cypher(
-        self, question: str, anchors: list[str], persona: Persona | None, *, reason: str | None
+        self,
+        question: str,
+        anchors: list[str],
+        persona: Persona | None,
+        *,
+        reason: str | None,
+        usage: list[UsageRecord],
+        model_override_id: str | None = None,
     ) -> str | None:
         retry = f"\nPrevious attempt was rejected: {reason}. Fix it." if reason else ""
         prompt = (
@@ -111,8 +157,12 @@ class RetrievalPlanner:
             f"Question: {question}. Anchors: {anchors}.{retry}"
         )
         response = self._router.route(
-            TaskType.CYPHER_GENERATION, CYPHER_PROMPT_VERSION, {"prompt": prompt}, persona
+            TaskType.CYPHER_GENERATION,
+            CYPHER_PROMPT_VERSION,
+            {"prompt": prompt, "model_override_id": model_override_id},
+            persona,
         )
+        usage.append(response.usage)
         if response.parsed is None:
             return None
         cypher = response.parsed.get("cypher")

@@ -30,7 +30,7 @@ from backend.graph import StructuralQueries, build_graph
 from backend.graph.builder import GraphBuildResult
 from backend.graph.store import GraphStore
 from backend.llm import LLMRouter
-from backend.llm.factory import build_gateway
+from backend.llm.factory import build_gateways
 from backend.observability import MetricsCollector
 from backend.persistence import InMemoryDeadLetter, InMemoryFileLedger
 from backend.persistence.dead_letter import DeadLetterRepo
@@ -108,10 +108,27 @@ def build_services(
     metrics = MetricsCollector()
     pool = store.quota_pool  # durable shared pool (persisted for real backing)
     accountant = QuotaAccountant(pool)
-    router = LLMRouter(
-        build_gateway(settings if isinstance(settings, Settings) else None),
-        sinks=[accountant, metrics],
+    primary_provider, gateway_clients = build_gateways(
+        settings if isinstance(settings, Settings) else None
     )
+    router = LLMRouter(
+        gateway_clients[primary_provider],
+        clients=gateway_clients,
+        sinks=[accountant, metrics],
+        log_llm=settings.log_llm if isinstance(settings, Settings) else False,
+    )
+    # Which providers a per-question model override can reach — drives GET /models.
+    model_providers = set(gateway_clients)
+    # If a local Ollama server is wired, ask it which models are actually pulled on
+    # this machine and register them so they appear in the dropdown (and resolve for
+    # the override). Best-effort: a down server just contributes nothing.
+    if "ollama" in gateway_clients and isinstance(settings, Settings):
+        from backend.llm import catalog
+        from backend.llm.ollama_discovery import discover_ollama_models
+
+        catalog.register_dynamic_models(
+            discover_ollama_models(settings.ollama_base_url, max_output=settings.ollama_max_output)
+        )
     governor = QuotaGovernor(pool)
 
     # For real backing these are the durable stores the indexing worker wrote to
@@ -128,10 +145,14 @@ def build_services(
         flows.generate(identify_flows(store.graph, StructuralQueries(store.graph)))
 
     services = {n.key for n in store.graph.nodes(NodeKind.SERVICE)}
-    planner = RetrievalPlanner(StructuralQueries(store.graph), router, services)
+    structural = StructuralQueries(store.graph)
+    planner = RetrievalPlanner(structural, router, services)
     answer = AnswerService(
         retrieval=retrieval, planner=planner, router=router,
         cache=SemanticAnswerCache(embedder), flows=flows, metrics=metrics, commit_sha=COMMIT,
+        # The summary pyramid and call graph were previously built, persisted, and
+        # then read only by the coverage screen — the answer path never saw them.
+        summaries=summaries, structural=structural,
     )
     coverage = CoverageService(
         manifest=manifest, graph=store.graph, summaries=summaries, flows=flows
@@ -144,6 +165,7 @@ def build_services(
         coverage_service=coverage,
         metrics=metrics,
         cors_origins=cors_origins,
+        model_providers=model_providers,
     )
     return AppServices(app=app, answer=answer, flows=flows, coverage=coverage, metrics=metrics)
 

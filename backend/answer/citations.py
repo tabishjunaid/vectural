@@ -55,6 +55,36 @@ def extract_markers(text: str) -> list[str]:
     return out
 
 
+# A chunk_id hash is hex; the full id is `service:path:lines:hash` (has colons).
+_HASHLIKE = re.compile(r"[0-9a-fA-F]{6,}")
+
+
+def _looks_like_citation(marker: str) -> bool:
+    """Whether a bracketed token is plausibly a citation *attempt*.
+
+    The answer prose can legitimately contain bracketed words that are NOT
+    citations — most sharply when the answer *describes the citation mechanism
+    itself* and writes a literal ``[chunk_id]`` or ``[id]``. Treating those as
+    failed citations refuses an otherwise well-cited answer (gpt-5 hit exactly
+    this on "how does Vectural work"). A real citation is either the full id
+    (contains ``:``) or the distinctive trailing hash (hex); a plain word is
+    neither. Only *attempts* that fail to resolve fail the gate — this never lets
+    an id/path/hash-shaped hallucination through, and the groundedness gate still
+    runs. A chunk_id fragment carries a ``:`` (full id) or ``/`` (a path/module
+    key) or is the bare hex hash; a plain word carries none of those.
+
+    A chunk_id and its hash never contain WHITESPACE — but bracketed prose does.
+    Verbose models (gpt-5 at DEEP) write emphasis/labels in brackets like
+    ``[finalize: upsert shared nodes + cross-service edges]`` or
+    ``[(Postgres: file_ledger, quota, etc.)]``; the colon there is punctuation, not
+    a citation, so a marker containing whitespace is never a citation attempt. This
+    stays fail-closed for real ids (a fabricated ``svc:path:1-2:hash`` has no
+    spaces and is still caught)."""
+    if any(ch.isspace() for ch in marker):
+        return False
+    return ":" in marker or "/" in marker or bool(_HASHLIKE.fullmatch(marker))
+
+
 def _match_unambiguously(marker: str, retrieved: list[SearchHit]) -> SearchHit | None:
     """Resolve a marker that is an abbreviation of exactly one retrieved chunk_id.
 
@@ -65,14 +95,42 @@ def _match_unambiguously(marker: str, retrieved: list[SearchHit]) -> SearchHit |
     alone rejected those, so well-grounded answers were refused for a formatting
     mismatch rather than a truthfulness one.
 
-    Fail-closed is preserved: a marker matching zero or **more than one** chunk
-    stays unresolved. Only an unambiguous reference resolves, so this never
-    invents an attribution or silently picks between candidates.
+    Models also reconstruct the *full* id from memory and get the path or line
+    range slightly wrong (``vectural/orchestration/starter.py:1-18`` for the real
+    ``vectural/backend/orchestration/starter.py:1-20``) while reproducing the
+    distinctive trailing hash correctly. So a marker that is itself a full/partial
+    id falls back to matching on its own trailing hash — the content-addressed
+    part that actually identifies the chunk.
+
+    Hash-based resolution stays strict — a hash is specific, so exactly one chunk
+    matches or the reference is genuinely ambiguous. Path/file-level resolution is
+    deliberately not: see below.
     """
     hits = [h for h in retrieved if h.chunk_id.rsplit(":", 1)[-1] == marker]
     if not hits:
         hits = [h for h in retrieved if h.chunk_id.endswith(marker)]
-    return hits[0] if len(hits) == 1 else None
+    if not hits and ":" in marker:
+        # A full/partial id whose path/lines drifted: match on its trailing hash.
+        tail = marker.rsplit(":", 1)[-1]
+        hits = [h for h in retrieved if h.chunk_id.rsplit(":", 1)[-1] == tail]
+    if hits:
+        return hits[0] if len(hits) == 1 else None
+    # File/module-level citation: models routinely cite a file by path — a bare
+    # `backend/graph/schema.py` (gpt-5) or a `service:path:symbol` like
+    # `vectural:…/opensearch_backend.py:connect` (qwen) — rather than reproducing
+    # the exact chunk id. A *relevant* file usually has SEVERAL retrieved chunks, so
+    # requiring exactly one match refused these as "ambiguous" even though the file's
+    # evidence was retrieved. If the cited path matches one or more retrieved chunks,
+    # the claim rests on that file's retrieved evidence — resolve to the best-scored
+    # one (groundedness still re-checks the claim against it). Fail-closed intact: a
+    # path matching NO retrieved chunk (an un-retrieved or hallucinated file) resolves
+    # to nothing and the gate refuses.
+    if "/" in marker:
+        path = next((seg for seg in marker.split(":") if "/" in seg), marker)
+        candidates = [h for h in retrieved if path in h.chunk_id]
+        if candidates:
+            return max(candidates, key=lambda h: h.score)
+    return None
 
 
 def resolve_citations(text: str, retrieved: list[SearchHit]) -> CitationResolution:
@@ -87,12 +145,20 @@ def resolve_citations(text: str, retrieved: list[SearchHit]) -> CitationResoluti
     for marker in extract_markers(text):
         hit = by_id.get(marker) or _match_unambiguously(marker, retrieved)
         if hit is None:
-            unresolved.append(marker)
+            # Only a genuine citation attempt (id/hash shape) that fails to resolve
+            # fails the gate; a bracketed plain word in prose (e.g. the answer
+            # describing the "[chunk_id]" mechanism) is not a citation — leave it be.
+            if _looks_like_citation(marker):
+                unresolved.append(marker)
             continue
         resolved.append(
             Citation(
                 index=len(resolved) + 1,
                 chunk_id=hit.chunk_id,
+                # Record the marker as written, not the id it resolved to: the
+                # client rewrites `[marker]` → `[n]` to render a chip, and the two
+                # differ whenever the model abbreviated.
+                marker=marker,
                 service=hit.service,
                 path=hit.path,
                 span=hit.span,

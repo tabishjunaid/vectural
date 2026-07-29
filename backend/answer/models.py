@@ -26,9 +26,53 @@ class Citation(BaseModel):
 
     index: int  # 1-based display order
     chunk_id: str
+    # The text that actually appeared between the brackets. Models abbreviate the
+    # long `service:path:lines:hash` id to its trailing hash, and the resolver
+    # accepts that (citations.py). Without recording which form was used, a client
+    # cannot find the marker to turn into a chip — it searches for the full id,
+    # finds nothing, and the citation renders as dead text.
+    marker: str = ""
     service: str
     path: str
     span: Span
+
+
+class LlmCall(BaseModel):
+    """One gateway call made while answering a question (analytics breakdown)."""
+
+    task: str  # entity_linking / cypher_generation / synthesis / groundedness
+    model: str  # the concrete model id the call actually used
+    input_tokens: int
+    output_tokens: int
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+class QueryAnalytics(BaseModel):
+    """Per-query analytics for one /ask — exact token usage plus context. Present
+    on every terminal state (a refusal still spends tokens; a cache hit spends 0)."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    llm_calls: int = 0
+    calls: list[LlmCall] = Field(default_factory=list)
+    tokens_by_task: dict[str, int] = Field(default_factory=dict)
+    latency_ms: float = 0.0
+    model: str | None = None  # the synthesis model this query used (concrete id)
+    depth: str = ""
+    persona: str = ""
+    mode: str = ""
+    from_cache: bool = False
+    citations: int = 0
+    evidence_chunks: int = 0
+    # Inferred question complexity (simple/moderate/complex) — how much of the
+    # depth budget the question warranted. None on the pre-plan exits (cache hit,
+    # empty retrieval) where it is not yet assessed.
+    complexity: str | None = None
+    cost_usd: float | None = None  # best-effort estimate; None if a price is unknown
 
 
 class Answer(BaseModel):
@@ -43,10 +87,21 @@ class Answer(BaseModel):
     from_cache: bool = False
     # Serving continues during a reindex with a *visible* staleness flag (§4.4, R3).
     stale: bool = False
+    # Grounded questions to explore next (§5.5 drill-down). Present on refusals
+    # too — that is where a reader most needs to know what they *can* ask.
+    follow_ups: list[str] = Field(default_factory=list)
+    # Per-query token usage + context, attached by the answer path before serving.
+    analytics: QueryAnalytics | None = None
 
     @classmethod
     def synthesized(
-        cls, *, persona: Persona, question: str, text: str, citations: list[Citation]
+        cls,
+        *,
+        persona: Persona,
+        question: str,
+        text: str,
+        citations: list[Citation],
+        follow_ups: list[str] | None = None,
     ) -> Answer:
         return cls(
             mode=AnswerMode.SYNTHESIZED,
@@ -54,11 +109,18 @@ class Answer(BaseModel):
             question=question,
             text=text,
             citations=citations,
+            follow_ups=follow_ups or [],
         )
 
     @classmethod
     def refusal(
-        cls, *, persona: Persona, question: str, reason: str, likely_services: list[str]
+        cls,
+        *,
+        persona: Persona,
+        question: str,
+        reason: str,
+        likely_services: list[str],
+        follow_ups: list[str] | None = None,
     ) -> Answer:
         # The refusal wording is the same source of truth the coverage surface uses
         # (§5.4), so the two never contradict each other about a service.
@@ -74,6 +136,7 @@ class Answer(BaseModel):
             text=text,
             reason=reason,
             likely_services=likely_services,
+            follow_ups=follow_ups or [],
         )
 
     @classmethod

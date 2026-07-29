@@ -5,6 +5,7 @@
    backend in dev (vite) and prod (nginx). */
 
 import type { Citation, CoverageRow, PersonaId, ReviewItem } from './mock-data';
+import type { DepthId } from './depth';
 
 const BASE = import.meta.env.VITE_API_BASE ?? '/api';
 
@@ -29,9 +30,36 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 interface BackendCitation {
   index: number;
   chunk_id: string;
+  marker: string; // the text the model actually wrote between the brackets
   service: string;
   path: string;
   span: { start: number; end: number };
+}
+
+interface BackendLlmCall {
+  task: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+interface BackendAnalytics {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  llm_calls: number;
+  calls: BackendLlmCall[];
+  tokens_by_task: Record<string, number>;
+  latency_ms: number;
+  model: string | null;
+  depth: string;
+  persona: string;
+  mode: string;
+  from_cache: boolean;
+  citations: number;
+  evidence_chunks: number;
+  complexity: string | null;
+  cost_usd: number | null;
 }
 
 interface BackendAnswer {
@@ -44,6 +72,8 @@ interface BackendAnswer {
   likely_services: string[];
   from_cache: boolean;
   stale: boolean;
+  follow_ups: string[];
+  analytics: BackendAnalytics | null;
 }
 
 interface BackendFlow {
@@ -60,6 +90,32 @@ interface BackendFlow {
 
 // ---- rendered shapes the UI consumes --------------------------------------
 
+export interface LlmCallStat {
+  task: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface LiveAnalytics {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  llmCalls: number;
+  calls: LlmCallStat[];
+  tokensByTask: Record<string, number>;
+  latencyMs: number;
+  model: string | null;
+  depth: string;
+  persona: string;
+  mode: string;
+  fromCache: boolean;
+  citations: number;
+  evidenceChunks: number;
+  complexity: string | null;
+  costUsd: number | null;
+}
+
 export interface LiveAnswer {
   mode: 'synthesized' | 'instant' | 'refusal';
   question: string;
@@ -71,6 +127,35 @@ export interface LiveAnswer {
   likelyServices: string[];
   fromCache: boolean;
   stale: boolean;
+  followUps: string[]; // grounded questions to explore next
+  analytics: LiveAnalytics | null; // per-query token usage + context
+}
+
+function adaptAnalytics(a: BackendAnalytics | null | undefined): LiveAnalytics | null {
+  if (!a) return null;
+  return {
+    inputTokens: a.input_tokens,
+    outputTokens: a.output_tokens,
+    totalTokens: a.total_tokens,
+    llmCalls: a.llm_calls,
+    calls: (a.calls ?? []).map((c) => ({
+      task: c.task,
+      model: c.model,
+      inputTokens: c.input_tokens,
+      outputTokens: c.output_tokens,
+    })),
+    tokensByTask: a.tokens_by_task ?? {},
+    latencyMs: a.latency_ms,
+    model: a.model,
+    depth: a.depth,
+    persona: a.persona,
+    mode: a.mode,
+    fromCache: a.from_cache,
+    citations: a.citations,
+    evidenceChunks: a.evidence_chunks,
+    complexity: a.complexity ?? null,
+    costUsd: a.cost_usd,
+  };
 }
 
 function basename(path: string): string {
@@ -94,12 +179,19 @@ function toCitation(c: BackendCitation, stale: boolean): Citation {
 }
 
 function adaptAnswer(a: BackendAnswer): LiveAnswer {
-  // Rewrite each [chunk_id] marker to its 1-based display index so the existing
-  // CitationChip / SourcesRail rendering (which is numeric) works unchanged.
+  // Rewrite each citation marker to its 1-based display index so the existing
+  // CitationChip / SourcesRail rendering (which matches [n]) works unchanged.
+  //
+  // Replace `marker` — the text the model actually wrote — not just `chunk_id`.
+  // Models abbreviate the long service:path:lines:hash id down to its trailing
+  // hash, so matching on chunk_id alone silently found nothing and left the
+  // citation as dead text with no chip and no way to drill down.
   let markdown = a.text;
   const citations: Record<number, Citation> = {};
   for (const c of a.citations) {
-    markdown = markdown.split(`[${c.chunk_id}]`).join(`[${c.index}]`);
+    for (const form of [c.marker, c.chunk_id]) {
+      if (form) markdown = markdown.split(`[${form}]`).join(`[${c.index}]`);
+    }
     citations[c.index] = toCitation(c, a.stale);
   }
   return {
@@ -113,13 +205,33 @@ function adaptAnswer(a: BackendAnswer): LiveAnswer {
     likelyServices: a.likely_services,
     fromCache: a.from_cache,
     stale: a.stale,
+    followUps: a.follow_ups ?? [],
+    analytics: adaptAnalytics(a.analytics),
   };
 }
 
 // ---- public API -----------------------------------------------------------
 
-export function ask(question: string, persona: PersonaId): Promise<LiveAnswer> {
-  return post<BackendAnswer>('/ask', { question, persona }).then(adaptAnswer);
+/* An answer-model choice for the composer dropdown (GET /models). Populated from
+   the backend so it only ever lists models whose provider gateway is wired. */
+export interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  hint: string;
+}
+
+export function getModels(): Promise<ModelOption[]> {
+  return get<ModelOption[]>('/models');
+}
+
+export function ask(
+  question: string,
+  persona: PersonaId,
+  depth: DepthId = 'standard',
+  model?: string,
+): Promise<LiveAnswer> {
+  return post<BackendAnswer>('/ask', { question, persona, depth, model }).then(adaptAnswer);
 }
 
 /* One progress event on the answer path (backend AnswerStage). `status` is
@@ -139,11 +251,13 @@ export async function askStream(
   question: string,
   persona: PersonaId,
   onStage: (event: AnswerStageEvent) => void,
+  depth: DepthId = 'standard',
+  model?: string,
 ): Promise<LiveAnswer> {
   const res = await fetch(`${BASE}/ask/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, persona }),
+    body: JSON.stringify({ question, persona, depth, model }),
   });
   if (!res.ok || !res.body) throw new Error(`POST /ask/stream → ${res.status}`);
 

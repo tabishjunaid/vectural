@@ -5,7 +5,7 @@ import { usePersona } from '../lib/persona';
 
 export const COVERAGE_PCT = 78; // headline coverage figure shown in rail + topbar chip
 
-type NavKey = 'ask' | 'coverage' | 'review';
+type NavKey = 'ask' | 'compare' | 'coverage' | 'review';
 
 interface AppShellProps {
   title: string;
@@ -41,6 +41,9 @@ export function AppShell({ title, activeNav, topbarRight, children }: AppShellPr
         <div className="rail-nav">
           <NavLink to="/ask" className={activeNav === 'ask' ? 'active' : undefined}>
             Ask
+          </NavLink>
+          <NavLink to="/compare" className={activeNav === 'compare' ? 'active' : undefined}>
+            Compare
           </NavLink>
           <NavLink to="/coverage" className={activeNav === 'coverage' ? 'active' : undefined}>
             Coverage <span className="badge">{COVERAGE_PCT}%</span>

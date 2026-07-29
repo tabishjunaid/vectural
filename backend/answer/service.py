@@ -11,6 +11,7 @@ retrieval are the two no-gateway-synthesis short circuits (§5.5, §5.4).
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -20,15 +21,32 @@ from pydantic import BaseModel
 
 from backend.answer.cache import SemanticAnswerCache
 from backend.answer.citations import resolve_citations
+from backend.answer.complexity import assess_complexity
+from backend.answer.context import (
+    AnswerContext,
+    StructuralContext,
+    gather_context,
+    render_context_block,
+)
+from backend.answer.depth import budget_for
+from backend.answer.followups import suggest_followups
 from backend.answer.groundedness import check_groundedness
-from backend.answer.models import Answer, AnswerMode
+from backend.answer.models import Answer, AnswerMode, LlmCall, QueryAnalytics
 from backend.answer.plan import RetrievalPlanner
 from backend.answer.synthesis import synthesise
-from backend.domain.models import Persona
+from backend.domain.models import Complexity, Depth, Persona
 from backend.freshness.state import FreshnessState
+from backend.llm import catalog
+from backend.llm.base import UsageRecord
 from backend.llm.router import LLMRouter
 from backend.retrieval.base import SearchHit
 from backend.retrieval.service import RetrievalService
+from backend.summarise.store import SummaryStore
+
+# Shares the router's LLM-audit logger: when VECTURAL_LOG_LLM is on, refusal
+# diagnostics (which citation/claim tripped a gate) print to stdout alongside the
+# request/response dumps; when off, the logger has no handler and stays silent.
+_audit = logging.getLogger("backend.llm.audit")
 
 
 class FlowEvidenceProvider(Protocol):
@@ -73,30 +91,46 @@ class AnswerService:
     flows: FlowEvidenceProvider | None = None
     freshness: FreshnessState | None = None
     metrics: AnswerMetrics | None = None
+    # Tier-2/3 summaries and the call graph — background that turns a pile of
+    # fragments into an explanation. Optional so the in-memory demo still runs.
+    summaries: SummaryStore | None = None
+    structural: StructuralContext | None = None
     commit_sha: str = "WORKING"
     top_n: int = 5
 
-    def answer(self, question: str, persona: Persona = Persona.ENGINEER) -> Answer:
+    def answer(
+        self,
+        question: str,
+        persona: Persona = Persona.ENGINEER,
+        depth: Depth = Depth.STANDARD,
+        model: str | None = None,
+    ) -> Answer:
         """Answer a question, timing it and recording answer-path metrics (§7.1)."""
         start = time.perf_counter()
-        result = self._compute(question, persona)
+        result = self._compute(question, persona, depth, model)
         if self.metrics is not None:
             self.metrics.record_latency_ms((time.perf_counter() - start) * 1000.0)
             self.metrics.record_answer(result.mode)
         return result
 
-    def _compute(self, question: str, persona: Persona) -> Answer:
+    def _compute(
+        self, question: str, persona: Persona, depth: Depth, model: str | None = None
+    ) -> Answer:
         """The terminal answer, draining the staged pipeline. The single Answer is
         always the last item :meth:`stream` yields."""
         result: Answer | None = None
-        for item in self.stream(question, persona):
+        for item in self.stream(question, persona, depth, model):
             if isinstance(item, Answer):
                 result = item
         assert result is not None  # the pipeline always yields exactly one Answer
         return result
 
     def stream(
-        self, question: str, persona: Persona = Persona.ENGINEER
+        self,
+        question: str,
+        persona: Persona = Persona.ENGINEER,
+        depth: Depth = Depth.STANDARD,
+        model: str | None = None,
     ) -> Iterator[AnswerStage | Answer]:
         """Walk the answer path, emitting an :class:`AnswerStage` as each stage
         starts/finishes and the terminal :class:`Answer` last.
@@ -108,10 +142,16 @@ class AnswerService:
         the slow gateway calls (synthesis, groundedness) are in flight instead of
         a single opaque "thinking…".
         """
+        t0 = time.perf_counter()
+        usage: list[UsageRecord] = []  # every gateway call this query makes
+
+        def elapsed_ms() -> float:
+            return (time.perf_counter() - t0) * 1000.0
+
         # Fast path: semantic cache hit — no gateway call at all (§5.5).
         if self.cache is not None:
             yield AnswerStage("cache", "start", "Checking the answer cache")
-            cached = self.cache.get(question, self.commit_sha, persona)
+            cached = self.cache.get(question, self.commit_sha, persona, depth, model)
             if cached is not None:
                 yield AnswerStage("cache", "hit", "Answered from cache — no model call")
                 yield cached.model_copy(
@@ -119,18 +159,25 @@ class AnswerService:
                         "mode": AnswerMode.INSTANT,
                         "from_cache": True,
                         "reason": "semantic cache hit",
+                        "analytics": _build_analytics(
+                            [], latency_ms=elapsed_ms(), model=model, depth=depth,
+                            persona=persona, mode="instant", from_cache=True,
+                            citations=len(cached.citations), evidence_chunks=0,
+                        ),
                     }
                 )
                 return
             yield AnswerStage("cache", "miss", "Not cached — computing a fresh answer")
 
         yield AnswerStage("plan", "start", "Planning which services to search")
-        plan = self.planner.plan(question, persona)
+        plan = self.planner.plan(question, persona, model_override_id=model)
+        usage.extend(plan.usage)  # entity-linking + 1-2 Cypher calls
         scope_label = ", ".join(sorted(plan.scope)) if plan.scope else "the whole estate"
         yield AnswerStage("plan", "ok", f"Scope: {scope_label}")
 
+        budget = budget_for(depth)
         yield AnswerStage("retrieve", "start", "Searching the indexed code and docs")
-        hits = self.retrieval.search(question, services=plan.scope, top_n=self.top_n)
+        hits = self.retrieval.search(question, services=plan.scope, top_n=budget.top_n)
 
         # Prefer reviewed cross-service narratives over live reconstruction
         # (§Phase 7 exit criterion): prepend approved flow evidence so synthesis
@@ -146,12 +193,62 @@ class AnswerService:
                 question=question,
                 reason="no reliable coverage — no evidence retrieved",
                 likely_services=plan.anchors,
+                # Nothing was retrieved, so there is no context to draw on — but
+                # the planner's anchors still name where to look, and a reader who
+                # got nothing back needs a next step more than anyone.
+                follow_ups=suggest_followups(
+                    AnswerContext(), [], question, likely_services=plan.anchors
+                ),
+            ).model_copy(
+                update={
+                    "analytics": _build_analytics(
+                        usage, latency_ms=elapsed_ms(), model=model, depth=depth,
+                        persona=persona, mode="refusal", from_cache=False,
+                        citations=0, evidence_chunks=0,
+                    )
+                }
             )
             return
         yield AnswerStage("retrieve", "ok", f"Found {len(hits)} passages of evidence")
 
+        # How involved is the question itself? Deterministic, no model call — shapes
+        # the synthesis explanation (concise for a lookup, full for a flow) within
+        # the depth budget the user chose. See backend/answer/complexity.py.
+        complexity = assess_complexity(question, plan, hits)
+
+        # Background that fragments cannot supply: what the touched services and
+        # modules are responsible for, and how they depend on each other.
+        ctx = gather_context(
+            anchors=plan.anchors,
+            hits=hits,
+            summaries=self.summaries,
+            structural=self.structural,
+        )
+        context_block = render_context_block(ctx)
+        # Computed once here so every exit below — both refusals and the answer —
+        # can offer somewhere to go next.
+        follow_ups = suggest_followups(ctx, [], question)
+        if context_block:
+            yield AnswerStage(
+                "context",
+                "ok",
+                f"Added {len(ctx.services)} service and {len(ctx.modules)} module summaries",
+            )
+
         yield AnswerStage("synthesize", "start", "Drafting an answer from the evidence")
-        response = synthesise(self.router, question=question, persona=persona, chunks=hits)
+        response = synthesise(
+            self.router,
+            question=question,
+            persona=persona,
+            chunks=hits,
+            context_block=context_block,
+            evidence_chars=budget.evidence_chars,
+            max_tokens=budget.max_tokens,
+            exhaustive=budget.exhaustive,
+            complexity=complexity,
+            model_override_id=model,
+        )
+        usage.append(response.usage)
         answer_text = response.text
         yield AnswerStage("synthesize", "ok", "Draft written")
 
@@ -159,38 +256,95 @@ class AnswerService:
         yield AnswerStage("cite", "start", "Resolving every citation to real evidence")
         resolution = resolve_citations(answer_text, hits)
         if not resolution.ok:
+            _audit.info(
+                "REFUSE cite model=%s unresolved=%r resolved=%d",
+                model, resolution.unresolved, len(resolution.resolved),
+            )
             yield AnswerStage("cite", "fail", "A citation did not resolve — withholding")
             yield Answer.refusal(
                 persona=persona,
                 question=question,
                 reason="citation could not be resolved to retrieved evidence",
                 likely_services=_likely(plan.anchors, hits),
+                follow_ups=follow_ups,
+            ).model_copy(
+                update={
+                    "analytics": _build_analytics(
+                        usage, latency_ms=elapsed_ms(), model=model, depth=depth,
+                        persona=persona, mode="refusal", from_cache=False,
+                        citations=len(resolution.resolved), evidence_chunks=len(hits),
+                        complexity=complexity,
+                    )
+                }
             )
             return
         yield AnswerStage("cite", "ok", f"{len(resolution.resolved)} citations resolved")
 
         # Gate 2 — groundedness, a separate Haiku call (§5.4).
+        # Scope the evidence to the chunks the answer actually CITED (gate 1 just
+        # resolved them), truncated to the same budget synthesis used. The judge
+        # then verifies against exactly the material the answer rested on — cheaper
+        # (no re-reading the 20 unrelated retrieved chunks at full length) and more
+        # accurate. Defensive: never hand the gate zero evidence.
+        cited_ids = {c.chunk_id for c in resolution.resolved}
+        cited_hits = [h for h in hits if h.chunk_id in cited_ids] or hits
         yield AnswerStage("ground", "start", "Verifying each claim against the evidence")
         grounded = check_groundedness(
-            self.router, answer_text=answer_text, chunks=hits, persona=persona
+            self.router,
+            answer_text=answer_text,
+            chunks=cited_hits,
+            # The judge must see what synthesis saw, or context-derived claims are
+            # rejected for being unverifiable against chunks alone.
+            context_block=context_block,
+            evidence_chars=budget.evidence_chars,
+            persona=persona,
+            # Reasoning models are over-strict self-judges — keep the gate on the
+            # calibrated default judge for them (see _gate_override).
+            model_override_id=_gate_override(model),
         )
-        if not grounded.grounded:
-            # Name the offending claim. The gate already identifies it, and
-            # discarding that left an opaque refusal: identical questions succeed
-            # or fail depending on whether *that* synthesis overreached, with no
-            # way for a reader to tell which claim was the problem.
+        if grounded.usage is not None:
+            usage.append(grounded.usage)
+        if grounded.should_withhold:
+            # Withhold only when a specific unsupported claim is named (or the
+            # verdict was unparseable) — a bare "not grounded" with no claim named
+            # is a non-actionable, often-spurious verdict from smaller judges and
+            # was refusing good answers. Name the offending claim in the refusal.
+            _audit.info("REFUSE ground model=%s claims=%r", model, grounded.unsupported_claims)
             yield AnswerStage("ground", "fail", "A claim was not supported — withholding")
             yield Answer.refusal(
                 persona=persona,
                 question=question,
                 reason=_ungrounded_reason(grounded.unsupported_claims),
                 likely_services=_likely(plan.anchors, hits),
+                follow_ups=follow_ups,
+            ).model_copy(
+                update={
+                    "analytics": _build_analytics(
+                        usage, latency_ms=elapsed_ms(), model=model, depth=depth,
+                        persona=persona, mode="refusal", from_cache=False,
+                        citations=len(resolution.resolved), evidence_chunks=len(hits),
+                        complexity=complexity,
+                    )
+                }
             )
             return
         yield AnswerStage("ground", "ok", "All claims grounded")
 
         answer = Answer.synthesized(
-            persona=persona, question=question, text=answer_text, citations=resolution.resolved
+            persona=persona,
+            question=question,
+            text=answer_text,
+            citations=resolution.resolved,
+            follow_ups=suggest_followups(ctx, resolution.resolved, question),
+        ).model_copy(
+            update={
+                "analytics": _build_analytics(
+                    usage, latency_ms=elapsed_ms(), model=model, depth=depth,
+                    persona=persona, mode="synthesized", from_cache=False,
+                    citations=len(resolution.resolved), evidence_chunks=len(hits),
+                    complexity=complexity,
+                )
+            }
         )
         # Visible staleness: if a contributing service is mid-reindex, serve the
         # answer but flag it (§4.4). Stale answers are not cached.
@@ -199,8 +353,88 @@ class AnswerService:
             return
 
         if self.cache is not None:
-            self.cache.put(question, self.commit_sha, persona, answer)
+            self.cache.put(question, self.commit_sha, persona, answer, depth, model)
         yield answer
+
+
+def _gate_override(model: str | None) -> str | None:
+    """The model the groundedness (R1) gate should run on for a given pick.
+
+    A reasoning model (the gpt-5 family) is a miscalibrated groundedness judge: it
+    over-reasons and flags its own legitimate inferential claims — the ones that
+    combine several sources — refusing sound answers even though the gate prompt
+    says not to. So for a reasoning-model pick the verifier falls back to the
+    calibrated default judge (``None`` → the primary gateway's cheap tier). Every
+    other pick keeps the picked model — crucially, LOCAL models still judge locally,
+    so a local pick stays $0 and never leaves the machine. R1 stays fail-closed
+    either way; only *which* model verifies changes."""
+    entry = catalog.find(model)
+    if entry is not None and entry.reasoning_effort is not None:
+        return None
+    return model
+
+
+def _estimate_cost(usage: list[UsageRecord]) -> float | None:
+    """Best-effort USD estimate for the query's token spend. None if any call's
+    concrete model has no price (so we never show a misleadingly-partial figure)."""
+    total = 0.0
+    for u in usage:
+        price = catalog.price_of(u.model_id)
+        if price is None:
+            return None
+        price_in, price_out = price
+        total += u.input_tokens / 1e6 * price_in + u.output_tokens / 1e6 * price_out
+    return round(total, 6)
+
+
+def _build_analytics(
+    usage: list[UsageRecord],
+    *,
+    latency_ms: float,
+    model: str | None,
+    depth: Depth,
+    persona: Persona,
+    mode: str,
+    from_cache: bool,
+    citations: int,
+    evidence_chunks: int,
+    complexity: Complexity | None = None,
+) -> QueryAnalytics:
+    """Assemble the per-query analytics from the UsageRecords collected this query."""
+    calls = [
+        LlmCall(
+            task=u.task_type.value,
+            model=u.model_id or u.model.value,
+            input_tokens=u.input_tokens,
+            output_tokens=u.output_tokens,
+        )
+        for u in usage
+    ]
+    by_task: dict[str, int] = {}
+    for u in usage:
+        by_task[u.task_type.value] = by_task.get(u.task_type.value, 0) + u.total_tokens
+    inp = sum(u.input_tokens for u in usage)
+    out = sum(u.output_tokens for u in usage)
+    # Prefer the concrete model the synthesis call actually used for the headline.
+    synth_model = next((c.model for c in calls if c.task == "synthesis"), model)
+    return QueryAnalytics(
+        input_tokens=inp,
+        output_tokens=out,
+        total_tokens=inp + out,
+        llm_calls=len(calls),
+        calls=calls,
+        tokens_by_task=by_task,
+        latency_ms=round(latency_ms, 1),
+        model=synth_model,
+        depth=depth.value,
+        persona=persona.value,
+        mode=mode,
+        from_cache=from_cache,
+        citations=citations,
+        evidence_chunks=evidence_chunks,
+        complexity=complexity.value if complexity is not None else None,
+        cost_usd=_estimate_cost(usage),
+    )
 
 
 _UNGROUNDED = "a claim was not grounded in the retrieved evidence"

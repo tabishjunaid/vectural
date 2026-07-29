@@ -47,6 +47,7 @@ class OpenAIGatewayClient:
         small_model: str | None = None,
         large_model: str | None = None,
         base_url: str | None = None,
+        api_key: str | None = None,
         client: Any | None = None,
     ) -> None:
         self._models: dict[ModelName, str] = {
@@ -54,16 +55,20 @@ class OpenAIGatewayClient:
             ModelName.SONNET: large_model or _DEFAULT_MODELS[ModelName.SONNET],
         }
         # Lazy import so the base install never needs the SDK. The SDK reads
-        # OPENAI_API_KEY (and OPENAI_BASE_URL) from the environment — we pass no key.
-        # An explicit base_url points the same client at an OpenAI-compatible
-        # enterprise gateway instead of api.openai.com.
+        # OPENAI_API_KEY (and OPENAI_BASE_URL) from the environment by default. An
+        # explicit base_url points the same client at any OpenAI-compatible endpoint
+        # (a company AI gateway, or a local Ollama server); an explicit api_key lets
+        # a pure-local machine authenticate that endpoint with a dummy key it
+        # ignores, without an OPENAI_API_KEY in the environment.
         self._client: OpenAI
         if client is not None:
             self._client = client
         else:
             import openai
 
-            self._client = openai.OpenAI(base_url=base_url) if base_url else openai.OpenAI()
+            # Passing None for either falls back to the SDK's env-based default
+            # (OPENAI_API_KEY, api.openai.com), preserving prior behaviour.
+            self._client = openai.OpenAI(base_url=base_url or None, api_key=api_key or None)
 
     def complete(self, request: GatewayRequest) -> GatewayResult:
         import openai
@@ -78,12 +83,21 @@ class OpenAIGatewayClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": request.prompt})
 
-        kwargs: dict[str, Any] = {
-            "model": self._models[request.model],
-            "messages": messages,
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-        }
+        # A per-request model override (the model dropdown) picks the concrete id
+        # AND its API convention: newer OpenAI models take max_completion_tokens
+        # and reject a custom temperature, where gpt-4o* take max_tokens + temperature.
+        model = request.model_override or self._models[request.model]
+        kwargs: dict[str, Any] = {"model": model, "messages": messages}
+        if request.model_override and request.override_uses_max_completion_tokens:
+            kwargs["max_completion_tokens"] = request.max_tokens
+        else:
+            kwargs["max_tokens"] = request.max_tokens
+        if not request.model_override or request.override_supports_temperature:
+            kwargs["temperature"] = request.temperature
+        if request.override_reasoning_effort:
+            # Reasoning models (gpt-5 family): cap the hidden reasoning so it does
+            # not consume the completion budget meant for the grounded answer.
+            kwargs["reasoning_effort"] = request.override_reasoning_effort
         if request.json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
@@ -109,4 +123,5 @@ class OpenAIGatewayClient:
             text=text,
             input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
             output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
+            model=model,
         )

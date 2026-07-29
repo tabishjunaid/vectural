@@ -110,6 +110,7 @@ class FakeGatewayClient:
             text=text,
             input_tokens=_count(request.prompt) + _count(request.system or ""),
             output_tokens=_count(text),
+            model=request.model_override or f"fake-{request.model.value}",
         )
 
 
