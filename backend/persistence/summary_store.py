@@ -59,6 +59,16 @@ class PgSummaryStore:
             )
             return [_to_record(row) for row in cur.fetchall()]
 
+    def delete_service(self, service: str) -> int:
+        """Purge all of a service's summary rows (any tier) — its exact key or a
+        ``<service>:`` / ``<service>/`` prefix (Ingestion UI "drop index")."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM summaries WHERE key = %s OR key LIKE %s OR key LIKE %s",
+                (service, f"{service}:%", f"{service}/%"),
+            )
+            return cur.rowcount
+
 
 def _to_record(row: tuple[Any, ...]) -> SummaryRecord:
     data = row[4] if isinstance(row[4], dict) else json.loads(row[4])

@@ -132,6 +132,16 @@ class OpenSearchBackend:
         )
         return int(result.get("deleted", 0))
 
+    def delete_service(self, service: str) -> int:
+        """Delete every chunk of a service (Ingestion UI "drop index"). Mirrors the
+        in-memory backend's ``delete_service`` so a drop works on the real store."""
+        result = self._client.delete_by_query(
+            index=self._index,
+            body={"query": {"term": {"service": service}}},
+            refresh=True,
+        )
+        return int(result.get("deleted", 0))
+
     def indexed_files(self) -> set[tuple[str, str]]:
         result = self._client.search(
             index=self._index,

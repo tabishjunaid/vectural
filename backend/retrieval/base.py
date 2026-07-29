@@ -83,6 +83,10 @@ class SearchBackend(Protocol):
 
     def delete_by_file(self, service: str, path: str) -> int: ...
 
+    def delete_service(self, service: str) -> int:
+        """Delete every chunk of a service (Ingestion UI "drop index")."""
+        ...
+
 
 class Reranker(Protocol):
     """Re-orders candidate hits for a query, returning at most ``top_n`` (§5.3

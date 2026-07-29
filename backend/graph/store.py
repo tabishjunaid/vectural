@@ -29,6 +29,10 @@ class GraphStore(Protocol):
 
     def in_neighbors(self, kind: NodeKind, key: str, rel: EdgeKind) -> list[NodeRef]: ...
 
+    def delete_node(self, kind: NodeKind, key: str) -> bool: ...
+
+    def delete_file(self, path: str) -> int: ...
+
 
 @dataclass
 class InMemoryGraphStore:

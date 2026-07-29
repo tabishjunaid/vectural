@@ -26,10 +26,17 @@ class SummaryRecord(BaseModel):
     updated_at: datetime
 
 
+def summary_key_belongs_to(key: str, service: str) -> bool:
+    """Whether a summary key belongs to a service — its exact name (tier-3 service
+    summary) or a ``<service>:`` / ``<service>/`` prefix (tier-1/2 file/module)."""
+    return key == service or key.startswith(f"{service}:") or key.startswith(f"{service}/")
+
+
 class SummaryStore(Protocol):
     def get(self, tier: int, key: str) -> SummaryRecord | None: ...
     def upsert(self, record: SummaryRecord) -> None: ...
     def all(self, tier: int) -> list[SummaryRecord]: ...
+    def delete_service(self, service: str) -> int: ...
 
 
 class InMemorySummaryStore:
@@ -46,3 +53,9 @@ class InMemorySummaryStore:
         return sorted(
             (r for r in self._rows.values() if r.tier == tier), key=lambda r: r.key
         )
+
+    def delete_service(self, service: str) -> int:
+        keys = [k for k in self._rows if summary_key_belongs_to(k[1], service)]
+        for k in keys:
+            del self._rows[k]
+        return len(keys)
