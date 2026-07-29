@@ -165,6 +165,11 @@ def build_services(
         graph=store.graph,
         file_ledger=store.file_ledger,
         summaries=summaries,
+        router=router,
+        governor=governor,
+        dead_letter=store.dead_letter,
+        accountant=accountant,
+        settings=settings if isinstance(settings, Settings) else None,
     )
 
     app = create_app(

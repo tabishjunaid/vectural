@@ -178,6 +178,17 @@ def create_app(
         except IngestionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/ingest/repos/{repo}/summarise", tags=["ingestion"])
+    def ingest_summarise(
+        repo: str, req: EstimateRequest, service: IngestionDep
+    ) -> dict[str, object]:
+        """Start the tier-1-4 LLM summaries on the chosen model (req.model) — a
+        local Ollama pick runs on-device for $0. Progress via the events stream."""
+        try:
+            return service.start_summarise(repo, model=req.model)
+        except IngestionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     def _job_control(fn: Callable[[str], dict[str, object]], repo: str) -> dict[str, object]:
         try:
             return fn(repo)

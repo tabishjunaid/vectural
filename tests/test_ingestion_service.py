@@ -127,6 +127,47 @@ def test_start_index_makes_a_fresh_repo_searchable(tmp_path: Path) -> None:
     assert next(r for r in svc.list_repos() if r.service == "gamma").phase == "idle"
 
 
+def test_summarise_job_produces_tier_summaries(tmp_path: Path) -> None:
+    from datetime import date
+
+    from backend.llm import FakeGatewayClient, LLMRouter
+    from backend.persistence import InMemoryDeadLetter
+    from backend.quota import QuotaConfig, QuotaGovernor, QuotaPool
+
+    (tmp_path / "delta").mkdir()
+    (tmp_path / "delta" / "m.py").write_text("def d():\n    return 1\n")
+    manifest_path = tmp_path / "manifest.yaml"
+    save_manifest(Manifest(services=[ServiceManifest(name="delta", path="delta")]), manifest_path)
+
+    summaries = InMemorySummaryStore()
+    pool = QuotaPool(QuotaConfig(50_000_000, 0.30, 4), period_start=date(2026, 7, 1))
+    svc = IngestionService(
+        estate_root=tmp_path, manifest_path=manifest_path,
+        search=InMemorySearchBackend(embedder=HashingEmbedder()),
+        graph=InMemoryGraphStore.from_graph([], []),
+        file_ledger=InMemoryFileLedger(), summaries=summaries,
+        router=LLMRouter(FakeGatewayClient()), governor=QuotaGovernor(pool),
+        dead_letter=InMemoryDeadLetter(),
+    )
+    svc.start_index("delta")
+    _wait_terminal(svc, "delta")
+
+    svc.start_summarise("delta", model="gpt-4o-mini")
+    final = _wait_terminal(svc, "delta")
+    assert final["phase"] == "done" and final["files_total"] >= 1
+    # The fake gateway produced tier-1 summaries for the service.
+    assert any(r.key.startswith("delta") for r in summaries.all(1))
+
+
+def test_summarise_without_gateway_raises(tmp_path: Path) -> None:
+    svc = _seed(tmp_path)  # no router/governor wired
+    try:
+        svc.start_summarise("alpha")
+    except IngestionError:
+        return
+    raise AssertionError("expected IngestionError when summarisation is not wired")
+
+
 def test_control_on_no_running_job_raises(tmp_path: Path) -> None:
     svc = _seed(tmp_path)
     for op in (svc.pause, svc.resume, svc.cancel):

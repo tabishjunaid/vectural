@@ -1,10 +1,10 @@
 """IngestionService — the API-owned control surface for the Ingestion UI.
 
 Owns the interactive per-repo lifecycle the playground exposes: add a repo by URL,
-list repos with their index state, estimate token+cost before spending, and DROP a
-repo's index. The deterministic-index and (model-selectable) summarise *jobs* — the
-async background runner with pause/cancel + SSE progress — build on this core in a
-following slice; this module is the synchronous, unit-testable foundation.
+list repos with their index state, estimate token+cost before spending, DROP a
+repo's index, and run the async background jobs — a deterministic index (free,
+local, pausable) and a model-selectable tier-1-4 summarise (a local Ollama pick
+runs on-device for $0) — with cooperative pause/cancel and SSE progress.
 
 Reuses the existing primitives rather than reinventing: `clone_repo_url` for
 add-by-URL, `estimate_repo` for the model-aware cost, and per-file/-service store
@@ -22,6 +22,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from backend.config import Settings
 from backend.domain.manifest import (
     Manifest,
     ServiceManifest,
@@ -35,8 +36,15 @@ from backend.graph.store import GraphStore
 from backend.ingestion.estimate import estimate_repo
 from backend.ingestion.pipeline import ingest_file
 from backend.ingestion.walker import walk_estate
+from backend.llm import catalog
+from backend.llm.router import LLMRouter
+from backend.orchestration.activities import IndexServiceActivities
+from backend.orchestration.work import EstateWork
+from backend.persistence.dead_letter import DeadLetterRepo
 from backend.persistence.file_ledger import FileLedgerRepo
+from backend.quota import QuotaAccountant, QuotaGovernor
 from backend.retrieval.base import SearchBackend
+from backend.summarise.driver import FileToSummarise
 from backend.summarise.store import SummaryStore
 
 _TERMINAL = frozenset({"done", "failed", "cancelled"})
@@ -110,6 +118,13 @@ class IngestionService:
     graph: GraphStore
     file_ledger: FileLedgerRepo
     summaries: SummaryStore | None = None
+    # Summarisation deps (opt-in tier-1-4 LLM job). When any is None the summarise
+    # endpoint is disabled but everything else (index/estimate/drop) still works.
+    router: LLMRouter | None = None
+    governor: QuotaGovernor | None = None
+    dead_letter: DeadLetterRepo | None = None
+    accountant: QuotaAccountant | None = None
+    settings: Settings | None = None
     commit_sha: str = "INGEST"
     _jobs: dict[str, IngestionJob] = field(default_factory=dict)
 
@@ -290,5 +305,103 @@ class IngestionService:
         except _Cancelled:
             job.phase = "cancelled"
         except Exception as exc:  # a worker thread must never crash silently
+            job.phase = "failed"
+            job.error = str(exc)
+
+    # -- jobs: LLM summarise (opt-in, model-selectable incl. local $0) ------ #
+
+    def start_summarise(self, service: str, *, model: str | None = None) -> dict[str, object]:
+        """Start the tier-1-4 LLM summaries for a repo on the chosen model. A local
+        Ollama pick runs on-device ($0); a cloud pick spends real tokens (the
+        estimate already showed the cost). Quota-gated via the governor."""
+        if self.router is None or self.governor is None or self.dead_letter is None:
+            raise IngestionError("summarisation is not available (no gateway wired)")
+        svc = next((s for s in self._load_manifest().services if s.name == service), None)
+        if svc is None:
+            raise IngestionError(f"unknown repo {service!r}")
+        existing = self._jobs.get(service)
+        if existing is not None and existing.active:
+            raise IngestionError(f"a job is already running for {service!r}")
+        job = IngestionJob(service=service, kind="summarise", phase="summarising")
+        job.thread = threading.Thread(
+            target=self._run_summarise, args=(job, svc, model), daemon=True
+        )
+        self._jobs[service] = job
+        job.thread.start()
+        return job.snapshot()
+
+    def _summarise_router(self, model: str | None) -> LLMRouter:
+        """A router whose default tier IS the chosen model, so the tier drivers
+        (which route at their default tier) run on it — local models included.
+        Falls back to the shared serving router when no/unknown model is given."""
+        assert self.router is not None
+        entry = catalog.find(model) if model else None
+        if entry is None or self.settings is None:
+            return self.router
+        from backend.llm.anthropic_client import AnthropicGatewayClient
+        from backend.llm.openai_client import OpenAIGatewayClient
+
+        s = self.settings
+        client: object
+        if entry.provider == "anthropic":
+            client = AnthropicGatewayClient(
+                haiku_model=entry.concrete, sonnet_model=entry.concrete,
+                base_url=s.anthropic_base_url or None,
+            )
+        elif entry.provider == "ollama":
+            client = OpenAIGatewayClient(
+                base_url=s.ollama_base_url or None, api_key=s.ollama_api_key or "ollama",
+                small_model=entry.concrete, large_model=entry.concrete,
+            )
+        else:
+            client = OpenAIGatewayClient(
+                base_url=s.openai_base_url or None,
+                small_model=entry.concrete, large_model=entry.concrete,
+            )
+        sinks = [self.accountant] if self.accountant is not None else []
+        return LLMRouter(client, sinks=sinks)  # type: ignore[arg-type]
+
+    def _files_to_summarise(self, svc: ServiceManifest) -> list[FileToSummarise]:
+        files: list[FileToSummarise] = []
+        for wf in walk_estate(self.estate_root, Manifest(services=[svc])):
+            try:
+                content = wf.abs_path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue  # binary / unreadable — the walker mostly filters these already
+            files.append(FileToSummarise(service=wf.service, path=wf.path, content=content))
+        return files
+
+    @staticmethod
+    def _cost(tokens: int, model: str | None) -> float | None:
+        price = catalog.price_of(model) if model else None
+        if price is None:
+            return None
+        in_price, out_price = price
+        return round(tokens / 1e6 * (in_price + out_price) / 2, 4)  # blended estimate
+
+    def _run_summarise(self, job: IngestionJob, svc: ServiceManifest, model: str | None) -> None:
+        try:
+            if job.cancel.is_set():
+                job.phase = "cancelled"
+                return
+            router = self._summarise_router(model)
+            activities = IndexServiceActivities(
+                work=EstateWork(by_service={}),  # structural already done by the index job
+                search=self.search,
+                graph=self.graph,
+                router=router,
+                governor=self.governor,  # type: ignore[arg-type]
+                file_ledger=self.file_ledger,
+                dead_letter=self.dead_letter,  # type: ignore[arg-type]
+                summaries=self.summaries,
+            )
+            files = self._files_to_summarise(svc)
+            job.files_total = len(files)
+            report = activities.summarise_service(svc.name, files, datetime.now(UTC))
+            job.files_done = len(files)
+            job.tokens = report.tokens_spent
+            job.cost_usd = self._cost(report.tokens_spent, model)
+            job.phase = "done"
+        except Exception as exc:
             job.phase = "failed"
             job.error = str(exc)
