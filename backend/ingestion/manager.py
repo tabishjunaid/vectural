@@ -14,7 +14,10 @@ runs against the in-memory backends in tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -27,11 +30,16 @@ from backend.domain.manifest import (
 )
 from backend.domain.models import NodeKind
 from backend.estate import clone_repo_url
+from backend.graph.builder import _service_node
 from backend.graph.store import GraphStore
 from backend.ingestion.estimate import estimate_repo
+from backend.ingestion.pipeline import ingest_file
+from backend.ingestion.walker import walk_estate
 from backend.persistence.file_ledger import FileLedgerRepo
 from backend.retrieval.base import SearchBackend
 from backend.summarise.store import SummaryStore
+
+_TERMINAL = frozenset({"done", "failed", "cancelled"})
 
 _CLONE_OK = frozenset({"cloned", "updated", "would clone", "would update"})
 
@@ -52,6 +60,48 @@ class RepoState(BaseModel):
     phase: str = "idle"  # live job phase (idle until the runner slice lands)
 
 
+class _Cancelled(Exception):
+    """Internal signal: a job was cancelled at a control checkpoint."""
+
+
+@dataclass
+class IngestionJob:
+    """A running (or finished) index/summarise job for one repo. The worker thread
+    mutates the progress fields in place; the SSE endpoint polls ``snapshot()``.
+    Control is cooperative: ``pause``/``cancel`` are checked between files/tiers."""
+
+    service: str
+    kind: str  # "index" | "summarise"
+    phase: str = "indexing"  # indexing | summarising | done | failed | cancelled
+    files_done: int = 0
+    files_total: int = 0
+    chunks: int = 0
+    tokens: int = 0
+    cost_usd: float | None = None
+    error: str | None = None
+    pause: threading.Event = field(default_factory=threading.Event)  # SET = paused
+    cancel: threading.Event = field(default_factory=threading.Event)
+    thread: threading.Thread | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.phase not in _TERMINAL
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "service": self.service,
+            "kind": self.kind,
+            "phase": self.phase,
+            "paused": self.pause.is_set(),
+            "files_done": self.files_done,
+            "files_total": self.files_total,
+            "chunks": self.chunks,
+            "tokens": self.tokens,
+            "cost_usd": self.cost_usd,
+            "error": self.error,
+        }
+
+
 @dataclass
 class IngestionService:
     estate_root: Path
@@ -60,6 +110,8 @@ class IngestionService:
     graph: GraphStore
     file_ledger: FileLedgerRepo
     summaries: SummaryStore | None = None
+    commit_sha: str = "INGEST"
+    _jobs: dict[str, IngestionJob] = field(default_factory=dict)
 
     # -- read -------------------------------------------------------------- #
 
@@ -95,12 +147,22 @@ class IngestionService:
             phase=phase,
         )
 
+    def _phase_of(self, service: str) -> str:
+        job = self._jobs.get(service)
+        if job is None or not job.active:
+            return "idle"
+        return "paused" if job.pause.is_set() else job.phase
+
     def list_repos(self) -> list[RepoState]:
         indexed = self._indexed_services()
         return [
-            self._repo_state(svc, indexed, phase="idle")
+            self._repo_state(svc, indexed, phase=self._phase_of(svc.name))
             for svc in self._load_manifest().services
         ]
+
+    def job_snapshot(self, service: str) -> dict[str, object] | None:
+        job = self._jobs.get(service)
+        return job.snapshot() if job is not None else None
 
     def estimate(self, service: str, *, model: str | None = None) -> dict[str, object]:
         return estimate_repo(self.estate_root, self._load_manifest(), service, model=model)
@@ -154,3 +216,79 @@ class IngestionService:
         remaining = [s for s in manifest.services if s.name != service]
         save_manifest(Manifest(services=remaining), self.manifest_path)
         return {"chunks": chunks, "files": len(paths), "summaries": summaries}
+
+    # -- jobs: deterministic index (async, pausable) ----------------------- #
+
+    def start_index(self, service: str) -> dict[str, object]:
+        """Start the deterministic index for a repo in a background thread: walk →
+        chunk → local embed (OpenSearch) → graph. Free/local, no gateway. Idempotent
+        (already-indexed files are re-written harmlessly), so a cancel leaves a
+        clean, re-runnable state."""
+        svc = next((s for s in self._load_manifest().services if s.name == service), None)
+        if svc is None:
+            raise IngestionError(f"unknown repo {service!r}")
+        existing = self._jobs.get(service)
+        if existing is not None and existing.active:
+            raise IngestionError(f"a job is already running for {service!r}")
+        job = IngestionJob(service=service, kind="index", phase="indexing")
+        job.thread = threading.Thread(target=self._run_index, args=(job, svc), daemon=True)
+        self._jobs[service] = job
+        job.thread.start()
+        return job.snapshot()
+
+    def pause(self, service: str) -> dict[str, object]:
+        self._active_job(service).pause.set()
+        return self._active_job(service).snapshot()
+
+    def resume(self, service: str) -> dict[str, object]:
+        self._active_job(service).pause.clear()
+        return self._active_job(service).snapshot()
+
+    def cancel(self, service: str) -> dict[str, object]:
+        job = self._active_job(service)
+        job.cancel.set()
+        job.pause.clear()  # unblock a paused worker so it can observe the cancel
+        return job.snapshot()
+
+    def _active_job(self, service: str) -> IngestionJob:
+        job = self._jobs.get(service)
+        if job is None or not job.active:
+            raise IngestionError(f"no running job for {service!r}")
+        return job
+
+    @staticmethod
+    def _await_control(job: IngestionJob) -> None:
+        """Cooperative checkpoint: block while paused, raise on cancel."""
+        while job.pause.is_set():
+            if job.cancel.is_set():
+                raise _Cancelled
+            time.sleep(0.1)
+        if job.cancel.is_set():
+            raise _Cancelled
+
+    def _run_index(self, job: IngestionJob, svc: ServiceManifest) -> None:
+        try:
+            now = datetime.now(UTC)
+            self.graph.upsert_nodes([_service_node(job.service, self.commit_sha, now)])
+            walked = list(walk_estate(self.estate_root, Manifest(services=[svc])))
+            job.files_total = len(walked)
+            for i, wf in enumerate(walked):
+                self._await_control(job)
+                result = ingest_file(
+                    source=wf.abs_path.read_bytes(),
+                    service=wf.service,
+                    path=wf.path,
+                    commit_sha=self.commit_sha,
+                    indexed_at=now,
+                )
+                self.search.index(result.chunks)
+                self.graph.upsert_nodes(result.delta.nodes)
+                self.graph.upsert_edges(result.delta.edges)
+                job.files_done = i + 1
+                job.chunks += len(result.chunks)
+            job.phase = "done"
+        except _Cancelled:
+            job.phase = "cancelled"
+        except Exception as exc:  # a worker thread must never crash silently
+            job.phase = "failed"
+            job.error = str(exc)

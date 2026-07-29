@@ -14,6 +14,7 @@ boundary that keeps the API testable with no infrastructure.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Iterator
 from typing import Annotated
 
@@ -167,6 +168,55 @@ def create_app(
             return service.drop(repo)
         except IngestionError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/ingest/repos/{repo}/index", tags=["ingestion"])
+    def ingest_index(repo: str, service: IngestionDep) -> dict[str, object]:
+        """Start the deterministic index (background, $0/local) — makes the repo
+        searchable. Progress via GET /ingest/repos/{repo}/events."""
+        try:
+            return service.start_index(repo)
+        except IngestionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def _job_control(fn: Callable[[str], dict[str, object]], repo: str) -> dict[str, object]:
+        try:
+            return fn(repo)
+        except IngestionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/ingest/repos/{repo}/pause", tags=["ingestion"])
+    def ingest_pause(repo: str, service: IngestionDep) -> dict[str, object]:
+        return _job_control(service.pause, repo)
+
+    @app.post("/ingest/repos/{repo}/resume", tags=["ingestion"])
+    def ingest_resume(repo: str, service: IngestionDep) -> dict[str, object]:
+        return _job_control(service.resume, repo)
+
+    @app.post("/ingest/repos/{repo}/cancel", tags=["ingestion"])
+    def ingest_cancel(repo: str, service: IngestionDep) -> dict[str, object]:
+        return _job_control(service.cancel, repo)
+
+    @app.get("/ingest/repos/{repo}/events", tags=["ingestion"])
+    def ingest_events(repo: str, service: IngestionDep) -> StreamingResponse:
+        """Live job progress as SSE — a ``progress`` event every ~0.5s until the job
+        reaches a terminal phase (done/failed/cancelled) or there is no job."""
+
+        def gen() -> Iterator[str]:
+            while True:
+                snap = service.job_snapshot(repo)
+                if snap is None:
+                    yield _event("progress", {"phase": "idle"})
+                    return
+                yield _event("progress", snap)
+                if snap["phase"] in ("done", "failed", "cancelled"):
+                    return
+                time.sleep(0.5)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
 
     @app.post("/search", response_model=SearchResponse, tags=["retrieval"])
     def search(req: SearchRequest, service: RetrievalDep) -> SearchResponse:

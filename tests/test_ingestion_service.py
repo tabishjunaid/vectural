@@ -86,3 +86,52 @@ def test_drop_unknown_repo_raises(tmp_path: Path) -> None:
     except IngestionError:
         return
     raise AssertionError("expected IngestionError")
+
+
+def _wait_terminal(svc: IngestionService, service: str, timeout: float = 10.0) -> dict:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snap = svc.job_snapshot(service)
+        assert snap is not None
+        if snap["phase"] in ("done", "failed", "cancelled"):
+            return snap
+        time.sleep(0.02)
+    raise AssertionError(f"job for {service} did not finish in {timeout}s")
+
+
+def test_start_index_makes_a_fresh_repo_searchable(tmp_path: Path) -> None:
+    (tmp_path / "gamma").mkdir()
+    (tmp_path / "gamma" / "m.py").write_text("def g():\n    return 1\n")
+    manifest = Manifest(services=[ServiceManifest(name="gamma", path="gamma")])
+    save_manifest(manifest, tmp_path / "manifest.yaml")
+
+    search = InMemorySearchBackend(embedder=HashingEmbedder())
+    graph = InMemoryGraphStore.from_graph([], [])
+    svc = IngestionService(
+        estate_root=tmp_path, manifest_path=tmp_path / "manifest.yaml",
+        search=search, graph=graph, file_ledger=InMemoryFileLedger(),
+        summaries=InMemorySummaryStore(),
+    )
+    assert not any(s == "gamma" for s, _ in search.indexed_files())
+
+    started = svc.start_index("gamma")
+    assert started["kind"] == "index"
+    final = _wait_terminal(svc, "gamma")
+    assert final["phase"] == "done" and final["files_done"] >= 1 and final["chunks"] >= 1
+    # It is now searchable, and the graph carries its Service node.
+    assert any(s == "gamma" for s, _ in search.indexed_files())
+    assert graph.has_node(NodeKind.SERVICE, "gamma")
+    # list_repos reflects it back to idle once the job is terminal.
+    assert next(r for r in svc.list_repos() if r.service == "gamma").phase == "idle"
+
+
+def test_control_on_no_running_job_raises(tmp_path: Path) -> None:
+    svc = _seed(tmp_path)
+    for op in (svc.pause, svc.resume, svc.cancel):
+        try:
+            op("alpha")
+        except IngestionError:
+            continue
+        raise AssertionError(f"{op.__name__} should raise when no job is running")
