@@ -198,6 +198,32 @@ def clone_or_update(repo: Repo, root: Path, *, shallow: bool, dry_run: bool) -> 
     return "cloned" if _run_git(cmd) else "clone failed"
 
 
+def repo_name_from_url(url: str) -> str:
+    """The local directory / service name for a Git URL: the last path segment,
+    minus a trailing ``.git``. Handles https and scp-style (``git@host:owner/repo``)."""
+    tail = url.strip().rstrip("/").rsplit("/", 1)[-1]
+    tail = tail.rsplit(":", 1)[-1]  # scp-style with no path, e.g. git@host:repo.git
+    if tail.endswith(".git"):
+        tail = tail[:-4]
+    return tail
+
+
+def clone_repo_url(
+    url: str, root: Path, *, shallow: bool = True, dry_run: bool = False
+) -> tuple[str, str]:
+    """Clone a single repo by URL into ``root/<name>``. Returns ``(name, outcome)``.
+
+    The Ingestion UI's "add repo by URL" path — bypasses parent enumeration and
+    reuses :func:`clone_or_update`. Shallow by default (indexing only needs the
+    current tree, not history)."""
+    name = repo_name_from_url(url)
+    if not name:
+        raise ValueError(f"could not derive a repo name from URL {url!r}")
+    repo = Repo(name=name, clone_url=url)
+    outcome = clone_or_update(repo, root, shallow=shallow, dry_run=dry_run)
+    return name, outcome
+
+
 def clone_estate(
     root: Path,
     parent: Parent,

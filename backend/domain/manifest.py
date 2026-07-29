@@ -12,7 +12,7 @@ this module enforces so the design-doc guarantee holds:
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -59,6 +59,10 @@ class ServiceManifest(BaseModel):
     art: str | None = None
     criticality: str | None = None
     owner: str | None = None
+    # The Git URL a repo was added from (Ingestion UI). Optional — hand-authored
+    # manifests and the sample estate omit it; it lets the UI key repo state on
+    # origin and offer re-clone. Not load-bearing for indexing.
+    git_url: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -153,3 +157,28 @@ def load_manifest(source: str) -> Manifest:
         raise
     except Exception as exc:  # pydantic ValidationError -> ManifestError for a single surface
         raise ManifestError(str(exc)) from exc
+
+
+def dump_manifest(manifest: Manifest) -> str:
+    """Serialize a manifest back to YAML text (the inverse of load_manifest).
+
+    Only non-empty fields are written, and services stay in list order, so a
+    round-trip through load→dump stays readable and diff-friendly. Used by the
+    Ingestion UI when it appends or removes a repo."""
+    services: list[dict[str, str]] = []
+    for svc in manifest.services:
+        entry: dict[str, str] = {"name": svc.name, "path": svc.path}
+        if svc.language is not None:
+            entry["language"] = svc.language.value
+        for opt in ("art", "criticality", "owner", "git_url"):
+            val = getattr(svc, opt)
+            if val:
+                entry[opt] = val
+        services.append(entry)
+    return yaml.safe_dump({"services": services}, sort_keys=False)
+
+
+def save_manifest(manifest: Manifest, path: Path) -> None:
+    """Validate then write a manifest to ``path`` (atomically enough for a UI)."""
+    load_manifest(dump_manifest(manifest))  # fail loudly before touching disk
+    path.write_text(dump_manifest(manifest), encoding="utf-8")
