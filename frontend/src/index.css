@@ -462,3 +462,22 @@ table.coverage-table tr.highlight { background: var(--accent-weak); }
 .compare-summary-row:nth-child(odd) { background: var(--surface-2, rgba(0,0,0,0.02)); }
 .compare-summary-row .k { color: var(--text-dim); font-weight: 600; }
 .compare-summary-row .va, .compare-summary-row .vb { font-variant-numeric: tabular-nums; text-align: right; }
+
+/* Ingestion page */
+.ingest-addbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.ingest-addbar input[type="text"] { flex: 1; min-width: 260px; border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; font-size: 13.5px; background: var(--panel); color: var(--text); }
+.ingest-error { color: #b42318; background: #fdeceb; border: 1px solid #f3c9c4; border-radius: 8px; padding: 8px 12px; font-size: 13px; margin: 0 0 12px; }
+.ingest-url { color: var(--text-faint); font-size: 11px; margin-top: 2px; }
+.ingest-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ingest-actions button { font: inherit; font-size: 12px; font-weight: 600; padding: 4px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--text); cursor: pointer; }
+.ingest-actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.ingest-actions button:disabled { opacity: 0.4; cursor: default; }
+.ingest-actions button.ingest-danger:hover:not(:disabled) { border-color: #b42318; color: #b42318; }
+.ingest-doneline { color: var(--green); font-size: 12px; font-weight: 600; }
+.ingest-estimate { margin-top: 14px; padding: 14px; }
+
+/* Live progress bar (index/summarise jobs) */
+.progress-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 150px; }
+.progress-bar { height: 7px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width 0.4s ease; }
+.progress-text { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }

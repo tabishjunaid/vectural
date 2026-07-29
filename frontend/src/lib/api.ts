@@ -331,3 +331,133 @@ export function reviewAction(
 ): Promise<BackendFlow> {
   return post<BackendFlow>(`/review/${id}/${verb}`, { architect, persona: 'architect', reason });
 }
+
+// ---- ingestion (the /ingest playground) -----------------------------------
+
+interface BackendRepoRow {
+  service: string;
+  path: string;
+  git_url: string | null;
+  indexed: boolean;
+  chunks: number;
+  summary_tier: number;
+  phase: string;
+}
+
+export interface RepoRow {
+  service: string;
+  path: string;
+  gitUrl: string | null;
+  indexed: boolean;
+  chunks: number;
+  summaryTier: number;
+  phase: string;
+}
+
+function adaptRepo(r: BackendRepoRow): RepoRow {
+  return {
+    service: r.service,
+    path: r.path,
+    gitUrl: r.git_url,
+    indexed: r.indexed,
+    chunks: r.chunks,
+    summaryTier: r.summary_tier,
+    phase: r.phase,
+  };
+}
+
+/* Live job progress — the /events SSE payload and the start/control responses. */
+export interface IngestJob {
+  service: string;
+  kind: string;
+  phase: string;
+  paused: boolean;
+  files_done: number;
+  files_total: number;
+  chunks: number;
+  tokens: number;
+  cost_usd: number | null;
+  error: string | null;
+}
+
+export interface IngestEstimate {
+  totals: {
+    files: number;
+    chunks: number;
+    embed_tokens: number;
+    gateway_tokens: number;
+    fits_monthly_indexing_budget: boolean;
+  };
+  model: string | null;
+  cost_usd: number | null;
+}
+
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`DELETE ${path} → ${res.status}`);
+  return res.json() as Promise<T>;
+}
+
+export function listRepos(): Promise<RepoRow[]> {
+  return get<BackendRepoRow[]>('/ingest/repos').then((rs) => rs.map(adaptRepo));
+}
+
+export function addRepo(url: string): Promise<RepoRow> {
+  return post<BackendRepoRow>('/ingest/repos', { url }).then(adaptRepo);
+}
+
+const repoPath = (service: string) => `/ingest/repos/${encodeURIComponent(service)}`;
+
+export function estimateRepo(service: string, model?: string): Promise<IngestEstimate> {
+  return post<IngestEstimate>(`${repoPath(service)}/estimate`, { model });
+}
+export function indexRepo(service: string): Promise<IngestJob> {
+  return post<IngestJob>(`${repoPath(service)}/index`, {});
+}
+export function summariseRepo(service: string, model?: string): Promise<IngestJob> {
+  return post<IngestJob>(`${repoPath(service)}/summarise`, { model });
+}
+export function pauseRepo(service: string): Promise<IngestJob> {
+  return post<IngestJob>(`${repoPath(service)}/pause`, {});
+}
+export function resumeRepo(service: string): Promise<IngestJob> {
+  return post<IngestJob>(`${repoPath(service)}/resume`, {});
+}
+export function cancelRepo(service: string): Promise<IngestJob> {
+  return post<IngestJob>(`${repoPath(service)}/cancel`, {});
+}
+export function dropRepo(
+  service: string,
+): Promise<{ chunks: number; files: number; summaries: number }> {
+  return del(repoPath(service));
+}
+
+/* Subscribe to a repo's live job progress (SSE). Fires onProgress per frame and
+   returns an unsubscribe fn. Mirrors askStream's SSE frame parsing. */
+export function ingestEvents(service: string, onProgress: (job: IngestJob) => void): () => void {
+  const ctrl = new AbortController();
+  void (async () => {
+    try {
+      const res = await fetch(`${BASE}${repoPath(service)}/events`, { signal: ctrl.signal });
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep: number;
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const line = frame.split('\n').find((l) => l.startsWith('data:'));
+          if (line) onProgress(JSON.parse(line.slice(5).trim()) as IngestJob);
+        }
+      }
+    } catch {
+      /* aborted or stream end — caller re-subscribes on the next action */
+    }
+  })();
+  return () => ctrl.abort();
+}
